@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deja"
+version = "0.1.0"
+description = "Semantic search for Claude Code sessions"
+requires-python = ">=3.10"
+dependencies = [
+    "fastembed>=0.6.0,<1.0",
+    "sqlite-vec==0.1.8",
+    "fastmcp>=2.0.0,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+deja = "deja.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deja"]
