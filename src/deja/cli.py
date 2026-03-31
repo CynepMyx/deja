@@ -3,6 +3,10 @@ import sys
 import glob
 import argparse
 
+if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from deja.db import init_db, get_meta, SCHEMA_VERSION
 from deja.indexer import get_embedding_model, index_file, gc_orphans
 
