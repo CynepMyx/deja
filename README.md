@@ -1,0 +1,104 @@
+# deja
+
+Semantic search over your Claude Code session history. Ask questions about past conversations by meaning, not just keywords.
+
+**deja** is an [MCP server](https://modelcontextprotocol.io/) that indexes Claude Code JSONL sessions and provides hybrid search (vector + full-text) directly from Claude Code.
+
+## How it works
+
+```
+~/.claude/projects/*/        deja index         index.db
+     *.jsonl           ──────────────►    (SQLite + vec + FTS5)
+                        embeddings
+                                           │
+                                           │  deja serve (MCP stdio)
+                                           ▼
+                                      Claude Code
+                                    "search past sessions"
+```
+
+1. **Index** — parses JSONL session files, extracts conversation turns, embeds with `multilingual-e5-small`, stores in SQLite
+2. **Serve** — MCP server opens the index and answers search queries via stdio transport
+
+Search combines vector KNN (semantic similarity) and FTS5 (keyword matching) via Reciprocal Rank Fusion.
+
+## Install
+
+```bash
+git clone https://github.com/CynepMyx/deja.git
+cd deja
+python -m venv .venv
+.venv/Scripts/pip install -e .        # Windows
+# .venv/bin/pip install -e .          # Linux/macOS
+```
+
+First run downloads the embedding model (~117 MB).
+
+## Usage
+
+### Build the index
+
+```bash
+deja index              # incremental — only new/changed files
+deja index --reindex    # full rebuild
+```
+
+Scans all `~/.claude/projects/*/*.jsonl` files.
+
+### Add to Claude Code
+
+Add to `~/.claude.json` under `mcpServers`:
+
+```json
+"deja": {
+    "type": "stdio",
+    "command": "/path/to/deja/.venv/Scripts/deja.exe",
+    "args": ["serve"],
+    "env": {
+        "PYTHONUNBUFFERED": "1"
+    }
+}
+```
+
+Restart Claude Code — deja will appear as a connected MCP server.
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `search` | Hybrid semantic + keyword search across all sessions |
+| `get_session` | Retrieve full context of a specific session by ID |
+
+**search** parameters:
+- `query` (string) — what to search for
+- `limit` (int, default 10) — max results
+- `project` (string, optional) — filter by project
+- `date_from` / `date_to` (string, optional) — ISO date range
+
+## Stack
+
+- **[fastembed](https://github.com/qdrant/fastembed)** — ONNX embeddings (`intfloat/multilingual-e5-small`, 384-dim)
+- **[sqlite-vec](https://github.com/asg017/sqlite-vec)** — vector KNN search in SQLite
+- **SQLite FTS5** — full-text keyword search
+- **[FastMCP](https://github.com/jlowin/fastmcp)** — MCP server framework
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Incremental index | < 30 sec |
+| Search latency (warm) | < 500 ms |
+| First search (cold start) | < 5 sec |
+| RAM (search) | ~150 MB |
+| RAM (indexing) | ~300 MB |
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## License
+
+[MIT](LICENSE)
