@@ -9,3 +9,4 @@ build/
 .pytest_cache/
 *.db
 *.lock
+tests/golden_pairs.json
