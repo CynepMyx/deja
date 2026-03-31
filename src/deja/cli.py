@@ -102,11 +102,18 @@ def main():
 
     sub.add_parser("serve", help="Start MCP server (stdio)")
 
+    ev = sub.add_parser("eval", help="Evaluate search quality with golden pairs")
+    ev.add_argument("--golden", default=None, help="Path to golden_pairs.json")
+    ev.add_argument("--limit", type=int, default=5, help="Results per query (default: 5)")
+
     args = parser.parse_args()
     if args.command == "index":
         cmd_index(args)
     elif args.command == "serve":
         cmd_serve(args)
+    elif args.command == "eval":
+        from deja.eval import evaluate
+        evaluate(golden_path=args.golden, limit=args.limit)
     else:
         parser.print_help()
 
