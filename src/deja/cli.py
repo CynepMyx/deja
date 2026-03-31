@@ -12,7 +12,7 @@ from deja.indexer import get_embedding_model, index_file, gc_orphans
 
 DEFAULT_INDEX_DIR = os.path.join(
     os.path.expanduser("~"),
-    ".claude", "projects", "C--Users-Oleg--local-bin", "memory", "deja",
+    ".claude", "deja",
 )
 DEFAULT_INDEX_PATH = os.path.join(DEFAULT_INDEX_DIR, "index.db")
 LOCK_PATH = os.path.join(DEFAULT_INDEX_DIR, "index.lock")

@@ -12,7 +12,7 @@ from deja.search import hybrid_search
 
 DEFAULT_INDEX_PATH = os.path.join(
     os.path.expanduser("~"),
-    ".claude", "projects", "C--Users-Oleg--local-bin", "memory", "deja", "index.db",
+    ".claude", "deja", "index.db",
 )
 
 
