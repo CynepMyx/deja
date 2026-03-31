@@ -79,6 +79,41 @@ Restart Claude Code — deja will appear as a connected MCP server.
 - `limit` (int, default 10) — max results
 - `project` (string, optional) — filter by project
 - `date_from` / `date_to` (string, optional) — ISO date range
+- `time_decay` (bool, default false) — boost recent results with log-decay scoring. Useful when history spans multiple months; with short history may hurt relevance
+
+### Auto-indexing (optional)
+
+Index automatically when a Claude Code session ends. Add a Stop hook to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "/path/to/deja/.venv/bin/deja index"
+                }
+            ]
+        }
+    ]
+}
+```
+
+On Windows with Git Bash, wrap in a shell script:
+
+```bash
+#!/bin/bash
+DEJA="/path/to/deja/.venv/Scripts/deja.exe"
+[ -f "$DEJA" ] && "$DEJA" index >/dev/null 2>&1 &
+```
+
+```json
+"command": "bash /path/to/deja-index.sh"
+```
+
+PID lock prevents concurrent indexers — safe with multiple sessions.
 
 ## Stack
 
