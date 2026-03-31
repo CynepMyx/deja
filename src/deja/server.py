@@ -3,7 +3,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 
 from deja.db import open_db_readonly, get_meta, SCHEMA_VERSION
@@ -70,22 +70,20 @@ async def search(
     project: str = None,
     date_from: str = None,
     date_to: str = None,
-    ctx=None,
+    ctx: Context = None,
 ) -> list[dict]:
     """Search past Claude Code sessions by meaning. Returns relevant conversation chunks with context."""
-    lifespan_ctx = ctx.fastmcp._lifespan_result
-    model = lifespan_ctx.get("model")
-    db = lifespan_ctx.get("db")
+    model = ctx.fastmcp._lifespan_result.get("model")
+    db = ctx.fastmcp._lifespan_result.get("db")
     if model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     return await asyncio.to_thread(_do_search, db, model, query, limit, project, date_from, date_to)
 
 
 @mcp.tool()
-async def get_session(session_id: str, ctx=None) -> list[dict]:
+async def get_session(session_id: str, ctx: Context = None) -> list[dict]:
     """Get full context of a specific session by session_id."""
-    lifespan_ctx = ctx.fastmcp._lifespan_result
-    db = lifespan_ctx.get("db")
+    db = ctx.fastmcp._lifespan_result.get("db")
     if db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     results = await asyncio.to_thread(_do_get_session, db, session_id)
