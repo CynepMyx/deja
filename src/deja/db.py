@@ -79,7 +79,7 @@ def get_meta(conn: sqlite3.Connection) -> dict:
     return {k: v for k, v in rows}
 
 def open_db_readonly(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
