@@ -1,5 +1,10 @@
+import math
 import sqlite3
+from datetime import datetime, timezone
+
 from deja.db import serialize_f32
+
+TIME_DECAY_ALPHA = 0.98
 
 def fts5_escape(query: str) -> str:
     return '"' + query.replace('"', '""') + '"'
@@ -84,13 +89,33 @@ def _rrf_merge(vec_results: list, fts_results: list, k: int = 60) -> list[dict]:
 
     return results
 
+def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    for r in results:
+        ts = r.get("timestamp", "")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            days_ago = max((now - dt).total_seconds() / 86400, 0)
+            r["score"] *= alpha ** math.log1p(days_ago)
+        except (ValueError, TypeError):
+            pass
+    results.sort(key=lambda r: r.get("score", 0), reverse=True)
+    return results
+
+
 def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
+    time_decay: bool = False,
 ) -> list[dict]:
     vec_results = _vector_search(conn, model, query, k=20)
     fts_results = _fts_search(conn, query, k=20)
     merged = _rrf_merge(vec_results, fts_results)
+
+    if time_decay:
+        merged = _apply_time_decay(merged)
 
     if project:
         merged = [r for r in merged if r.get("project_path") == project]
