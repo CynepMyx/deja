@@ -73,7 +73,8 @@ async def search(
     ctx: Context = None,
 ) -> list[dict]:
     """Search past Claude Code sessions by meaning. Returns relevant conversation chunks with context."""
-    lc = ctx.lifespan_context
+    # FastMCP 2.14: no public lifespan_context API yet, using _lifespan_result
+    lc = ctx.fastmcp._lifespan_result
     model = lc.get("model")
     db = lc.get("db")
     if model is None or db is None:
@@ -84,7 +85,7 @@ async def search(
 @mcp.tool()
 async def get_session_chunks(session_id: str, ctx: Context = None) -> list[dict]:
     """Get indexed chunks for a session by session_id. Returns chunk_text fragments, not original messages. Long turns may be split with overlap."""
-    lc = ctx.lifespan_context
+    lc = ctx.fastmcp._lifespan_result
     db = lc.get("db")
     if db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
