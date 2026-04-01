@@ -89,6 +89,67 @@ def cmd_index(args):
     finally:
         _release_lock(lock_fd)
 
+def cmd_stats():
+    import sqlite3
+    import sqlite_vec
+    from datetime import datetime
+
+    if not os.path.exists(DEFAULT_INDEX_PATH):
+        print("[deja] index not found. Run 'deja index' first.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(DEFAULT_INDEX_PATH)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    vectors = conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+    fts = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    files = conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0]
+    sessions = conn.execute("SELECT COUNT(DISTINCT session_id) FROM chunks").fetchone()[0]
+    projects = conn.execute("SELECT COUNT(DISTINCT project_path) FROM chunks").fetchone()[0]
+
+    meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+
+    db_size = os.path.getsize(DEFAULT_INDEX_PATH) / 1024 / 1024
+    db_mtime = datetime.fromtimestamp(os.path.getmtime(DEFAULT_INDEX_PATH)).strftime("%Y-%m-%d %H:%M")
+
+    # Consistency check
+    issues = []
+    if chunks != vectors:
+        issues.append(f"chunks ({chunks}) != vectors ({vectors})")
+    if chunks != fts:
+        issues.append(f"chunks ({chunks}) != fts ({fts})")
+
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM chunks_vec WHERE rowid NOT IN (SELECT id FROM chunks)"
+    ).fetchone()[0]
+    if orphans:
+        issues.append(f"{orphans} orphan vector rows")
+
+    print(f"Chunks:     {chunks:,}")
+    print(f"Vectors:    {vectors:,}")
+    print(f"FTS:        {fts:,}")
+    print(f"Sessions:   {sessions}")
+    print(f"Projects:   {projects}")
+    print(f"Files:      {files}")
+    print(f"Model:      {meta.get('embedding_model', '?')}")
+    print(f"Dim:        {meta.get('embedding_dim', '?')}")
+    print(f"Schema:     v{meta.get('schema_version', '?')}")
+    print(f"DB size:    {db_size:.1f} MB")
+    print(f"DB path:    {DEFAULT_INDEX_PATH}")
+    print(f"Last index: {db_mtime}")
+
+    if issues:
+        print(f"\nISSUES:")
+        for issue in issues:
+            print(f"  - {issue}")
+    else:
+        print(f"\nHealth:     OK")
+
+    conn.close()
+
 def cmd_serve(args):
     from deja.server import mcp
     mcp.run(transport="stdio")
@@ -135,6 +196,8 @@ def main():
 
     sub.add_parser("serve", help="Start MCP server (stdio)")
 
+    sub.add_parser("stats", help="Show index statistics")
+
     sr = sub.add_parser("search", help="Search indexed sessions")
     sr.add_argument("query", help="Search query")
     sr.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
@@ -149,6 +212,8 @@ def main():
         cmd_index(args)
     elif args.command == "serve":
         cmd_serve(args)
+    elif args.command == "stats":
+        cmd_stats()
     elif args.command == "search":
         cmd_search(args)
     elif args.command == "eval":
