@@ -73,8 +73,9 @@ async def search(
     ctx: Context = None,
 ) -> list[dict]:
     """Search past Claude Code sessions by meaning. Returns relevant conversation chunks with context."""
-    model = ctx.fastmcp._lifespan_result.get("model")
-    db = ctx.fastmcp._lifespan_result.get("db")
+    lc = ctx.lifespan_context
+    model = lc.get("model")
+    db = lc.get("db")
     if model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     return await asyncio.to_thread(_do_search, db, model, query, limit, project, date_from, date_to)
@@ -83,7 +84,8 @@ async def search(
 @mcp.tool()
 async def get_session_chunks(session_id: str, ctx: Context = None) -> list[dict]:
     """Get indexed chunks for a session by session_id. Returns chunk_text fragments, not original messages. Long turns may be split with overlap."""
-    db = ctx.fastmcp._lifespan_result.get("db")
+    lc = ctx.lifespan_context
+    db = lc.get("db")
     if db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     results = await asyncio.to_thread(_do_get_session, db, session_id)
