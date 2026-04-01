@@ -41,16 +41,19 @@ def extract_content(content) -> tuple[str, str]:
     return "\n".join(text_parts), "\n".join(tool_result_parts)
 
 def parse_jsonl_file(
-    path: str, offset: int = 0
+    path: str, offset: int = 0, start_message_index: int = 0
 ) -> Generator[dict, None, None]:
     pending_user = None
-    message_index = 0
+    message_index = start_message_index
 
     with open(path, "r", encoding="utf-8") as f:
         if offset > 0:
             f.seek(offset)
 
-        for line in f:
+        while True:
+            line = f.readline()
+            if not line:
+                break
             line = line.strip()
             if not line:
                 continue
@@ -83,12 +86,14 @@ def parse_jsonl_file(
                 combined_tool = "\n".join(
                     filter(None, [pending_user["tool_result"], tool_text])
                 )
+                completed_offset = f.tell()
                 yield {
                     "user_text": pending_user["text"],
                     "assistant_text": text,
                     "tool_result_text": combined_tool[:TOOL_RESULT_MAX],
                     "timestamp": timestamp or pending_user["timestamp"],
                     "message_index": message_index,
+                    "completed_offset": completed_offset,
                 }
                 message_index += 1
                 pending_user = None

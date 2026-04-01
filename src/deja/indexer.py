@@ -3,7 +3,7 @@ import sys
 from fastembed import TextEmbedding
 from fastembed.text.text_embedding import PoolingType, ModelSource
 from deja.db import serialize_f32
-from deja.parser import parse_jsonl_file, get_file_end_offset
+from deja.parser import parse_jsonl_file
 from deja.chunker import make_chunks
 
 BATCH_SIZE = 32
@@ -52,6 +52,21 @@ def _delete_file_chunks(conn, session_id: str):
         conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
     conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
 
+def _get_resume_state(conn, session_id: str, path: str) -> tuple[int, int]:
+    """Get (offset, start_message_index) for incremental indexing."""
+    row = conn.execute(
+        "SELECT last_offset FROM indexed_files WHERE path = ?", (path,)
+    ).fetchone()
+    offset = row[0] if row else 0
+
+    row = conn.execute(
+        "SELECT MAX(message_index) FROM chunks WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    start_idx = (row[0] + 1) if row and row[0] is not None else 0
+
+    return offset, start_idx
+
 def index_file(conn, model: TextEmbedding, path: str, project_path: str):
     session_id = os.path.splitext(os.path.basename(path))[0]
     needs = check_needs_reindex(conn, path)
@@ -60,18 +75,19 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
         return
 
     offset = 0
+    start_message_index = 0
+
     if needs == "full":
         _delete_file_chunks(conn, session_id)
     elif needs == "incremental":
-        row = conn.execute(
-            "SELECT last_offset FROM indexed_files WHERE path = ?", (path,)
-        ).fetchone()
-        offset = row[0] if row else 0
+        offset, start_message_index = _get_resume_state(conn, session_id, path)
 
-    turns = list(parse_jsonl_file(path, offset=offset))
+    turns = list(parse_jsonl_file(path, offset=offset, start_message_index=start_message_index))
     if not turns:
-        _update_file_meta(conn, path)
+        _update_file_meta(conn, path, offset)
         return
+
+    last_completed_offset = turns[-1].get("completed_offset", None)
 
     all_chunks = []
     for turn in turns:
@@ -85,35 +101,69 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
 
         for chunk, embedding in zip(batch_chunks, embeddings):
             try:
-                cursor = conn.execute(
-                    """INSERT OR REPLACE INTO chunks
-                    (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (chunk["session_id"], chunk["message_index"], chunk["split_index"],
-                     chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
-                     chunk.get("tool_result_text", "")),
-                )
-                rowid = cursor.lastrowid
-                conn.execute(
-                    "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
-                    (rowid, serialize_f32(embedding.tolist())),
-                )
-                conn.execute(
-                    "INSERT OR REPLACE INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?, ?, ?)",
-                    (rowid, chunk["chunk_text"], chunk.get("tool_result_text", "")),
-                )
+                _upsert_chunk(conn, chunk, embedding)
             except Exception as e:
                 print(f"[deja] error inserting chunk: {e}", file=sys.stderr)
 
-    _update_file_meta(conn, path)
+    save_offset = last_completed_offset if last_completed_offset else offset
+    _update_file_meta(conn, path, save_offset)
     conn.commit()
 
-def _update_file_meta(conn, path: str):
+def _upsert_chunk(conn, chunk: dict, embedding):
+    """Insert or update chunk, preserving stable rowid."""
+    vec_bytes = serialize_f32(embedding.tolist())
+
+    # Check if chunk already exists
+    row = conn.execute(
+        "SELECT id FROM chunks WHERE session_id = ? AND message_index = ? AND split_index = ?",
+        (chunk["session_id"], chunk["message_index"], chunk["split_index"]),
+    ).fetchone()
+
+    if row:
+        # Update existing — rowid stays the same
+        chunk_id = row[0]
+        conn.execute(
+            """UPDATE chunks SET timestamp = ?, project_path = ?,
+               chunk_text = ?, tool_result_text = ?
+               WHERE id = ?""",
+            (chunk["timestamp"], chunk["project_path"],
+             chunk["chunk_text"], chunk.get("tool_result_text", ""), chunk_id),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+            (chunk_id, vec_bytes),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?, ?, ?)",
+            (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
+        )
+    else:
+        # Insert new
+        cursor = conn.execute(
+            """INSERT INTO chunks
+            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (chunk["session_id"], chunk["message_index"], chunk["split_index"],
+             chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
+             chunk.get("tool_result_text", "")),
+        )
+        chunk_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+            (chunk_id, vec_bytes),
+        )
+        conn.execute(
+            "INSERT INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?, ?, ?)",
+            (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
+        )
+
+def _update_file_meta(conn, path: str, completed_offset: int = None):
     stat = os.stat(path)
+    offset = completed_offset if completed_offset else stat.st_size
     conn.execute(
         """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size)
         VALUES (?, ?, ?, ?)""",
-        (path, stat.st_size, stat.st_mtime, stat.st_size),
+        (path, offset, stat.st_mtime, stat.st_size),
     )
 
 def gc_orphans(conn, known_paths: set[str]):
