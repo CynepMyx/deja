@@ -72,7 +72,7 @@ Restart Claude Code — deja will appear as a connected MCP server.
 | Tool | Description |
 |------|-------------|
 | `search` | Hybrid semantic + keyword search across all sessions |
-| `get_session` | Retrieve full context of a specific session by ID |
+| `get_session_chunks` | Get indexed chunks for a session (not raw messages) |
 
 **search** parameters:
 - `query` (string) — what to search for

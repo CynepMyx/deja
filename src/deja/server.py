@@ -81,8 +81,8 @@ async def search(
 
 
 @mcp.tool()
-async def get_session(session_id: str, ctx: Context = None) -> list[dict]:
-    """Get full context of a specific session by session_id."""
+async def get_session_chunks(session_id: str, ctx: Context = None) -> list[dict]:
+    """Get indexed chunks for a session by session_id. Returns chunk_text fragments, not original messages. Long turns may be split with overlap."""
     db = ctx.fastmcp._lifespan_result.get("db")
     if db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
