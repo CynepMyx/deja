@@ -7,7 +7,12 @@ from deja.db import serialize_f32
 TIME_DECAY_ALPHA = 0.98
 
 def fts5_escape(query: str) -> str:
-    return '"' + query.replace('"', '""') + '"'
+    """Escape query for FTS5: token-wise AND, each token quoted."""
+    tokens = query.split()
+    if not tokens:
+        return '""'
+    escaped = ['"' + t.replace('"', '""') + '"' for t in tokens]
+    return " AND ".join(escaped)
 
 def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
     query_embedding = list(model.embed([query]))[0]

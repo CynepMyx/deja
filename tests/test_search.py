@@ -41,4 +41,9 @@ def test_search_with_project_filter():
 
 def test_fts5_escape_handles_special_chars():
     assert fts5_escape('docker-compose') == '"docker-compose"'
-    assert fts5_escape('test "quotes"') == '"test ""quotes"""'
+    assert fts5_escape('test "quotes"') == '"test" AND """quotes"""'
+
+def test_fts5_escape_token_and():
+    assert fts5_escape('nginx proxy') == '"nginx" AND "proxy"'
+    assert fts5_escape('single') == '"single"'
+    assert fts5_escape('') == '""'
