@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+### Features
+- **`get_context` MCP tool** — retrieve a chunk with surrounding turns (±window) from the same session; no need to fetch entire session (#4)
+- **Secret filtering** — passwords, API keys, tokens, and private keys are redacted (`[REDACTED]`) during indexing (#5)
+
+### Tests
+- Added tests for get_context (window, not found)
+- Added tests for secret redaction (AWS, GitHub, Bearer, passwords, private keys)
+
 ## 0.2.0 (2026-04-02)
 
 ### Breaking Changes

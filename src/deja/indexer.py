@@ -6,6 +6,7 @@ from fastembed.text.text_embedding import PoolingType, ModelSource
 from deja.db import serialize_f32
 from deja.parser import parse_jsonl_file
 from deja.chunker import make_chunks
+from deja.secrets import redact
 
 EMBED_BATCH_SIZE = 32
 TURNS_PER_BATCH = 50
@@ -110,6 +111,9 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
             all_embeddings.extend(model.embed(emb_batch))
 
         for chunk, embedding in zip(chunks, all_embeddings):
+            chunk["chunk_text"] = redact(chunk["chunk_text"])
+            if chunk.get("tool_result_text"):
+                chunk["tool_result_text"] = redact(chunk["tool_result_text"])
             try:
                 _upsert_chunk(conn, chunk, embedding)
             except Exception as e:

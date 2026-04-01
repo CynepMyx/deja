@@ -63,6 +63,36 @@ def _do_get_session(conn, session_id):
     ]
 
 
+def _do_get_context(conn, chunk_id, window):
+    anchor = conn.execute(
+        "SELECT session_id, message_index FROM chunks WHERE id = ?",
+        (chunk_id,),
+    ).fetchone()
+    if not anchor:
+        return None, []
+
+    session_id, msg_idx = anchor
+    lo = msg_idx - window
+    hi = msg_idx + window
+
+    rows = conn.execute(
+        """SELECT id, chunk_text, message_index, split_index, timestamp, project_path
+        FROM chunks
+        WHERE session_id = ? AND message_index BETWEEN ? AND ?
+        ORDER BY message_index, split_index""",
+        (session_id, lo, hi),
+    ).fetchall()
+
+    return chunk_id, [
+        {
+            "id": r[0], "chunk_text": r[1], "message_index": r[2],
+            "split_index": r[3], "timestamp": r[4], "project_path": r[5],
+            "is_anchor": r[0] == chunk_id,
+        }
+        for r in rows
+    ]
+
+
 @mcp.tool()
 async def search(
     query: str,
@@ -79,6 +109,19 @@ async def search(
     if model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     return await asyncio.to_thread(_do_search, db, model, query, limit, project, date_from, date_to)
+
+
+@mcp.tool()
+async def get_context(chunk_id: int, window: int = 2, ctx: Context = None) -> dict:
+    """Get a chunk with surrounding context. Returns the anchor chunk and neighboring turns (±window by message_index) from the same session."""
+    lc = ctx.lifespan_context
+    db = lc.get("db")
+    if db is None:
+        raise ToolError("Index not loaded. Run 'deja index' first.")
+    anchor_id, chunks = await asyncio.to_thread(_do_get_context, db, chunk_id, window)
+    if anchor_id is None:
+        raise ToolError(f"Chunk {chunk_id} not found in index.")
+    return {"anchor_id": anchor_id, "chunks": chunks}
 
 
 @mcp.tool()
