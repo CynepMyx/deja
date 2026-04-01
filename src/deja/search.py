@@ -115,8 +115,10 @@ def hybrid_search(
     project: str = None, date_from: str = None, date_to: str = None,
     time_decay: bool = False,
 ) -> list[dict]:
-    vec_results = _vector_search(conn, model, query, k=20)
-    fts_results = _fts_search(conn, query, k=20)
+    has_filters = project or date_from or date_to
+    k = 100 if has_filters else 20
+    vec_results = _vector_search(conn, model, query, k=k)
+    fts_results = _fts_search(conn, query, k=k)
     merged = _rrf_merge(vec_results, fts_results)
 
     if time_decay:
