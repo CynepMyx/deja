@@ -93,6 +93,39 @@ def cmd_serve(args):
     from deja.server import mcp
     mcp.run(transport="stdio")
 
+def cmd_search(args):
+    import sqlite3
+    import sqlite_vec
+    from deja.indexer import get_embedding_model
+    from deja.search import hybrid_search
+
+    if not os.path.exists(DEFAULT_INDEX_PATH):
+        print("[deja] index not found. Run 'deja index' first.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(DEFAULT_INDEX_PATH, check_same_thread=False)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    print("Loading model...", file=sys.stderr)
+    model = get_embedding_model()
+
+    results = hybrid_search(conn, model, args.query, limit=args.limit, project=args.project)
+
+    if not results:
+        print("No results found.")
+    else:
+        for i, r in enumerate(results, 1):
+            score = r.get("score", 0)
+            sid = r.get("session_id", "?")[:12]
+            ts = r.get("timestamp", "")[:19]
+            text = r.get("chunk_text", "")[:200].replace("\n", " ")
+            print(f"\n[{i}] score={score:.4f} | {sid} | {ts}")
+            print(f"    {text}")
+
+    conn.close()
+
 def main():
     parser = argparse.ArgumentParser(prog="deja", description="Semantic search for Claude Code sessions")
     sub = parser.add_subparsers(dest="command")
@@ -101,6 +134,11 @@ def main():
     idx.add_argument("--reindex", action="store_true", help="Force full reindex")
 
     sub.add_parser("serve", help="Start MCP server (stdio)")
+
+    sr = sub.add_parser("search", help="Search indexed sessions")
+    sr.add_argument("query", help="Search query")
+    sr.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    sr.add_argument("--project", default=None, help="Filter by project path")
 
     ev = sub.add_parser("eval", help="Evaluate search quality with golden pairs")
     ev.add_argument("--golden", default=None, help="Path to golden_pairs.json")
@@ -111,6 +149,8 @@ def main():
         cmd_index(args)
     elif args.command == "serve":
         cmd_serve(args)
+    elif args.command == "search":
+        cmd_search(args)
     elif args.command == "eval":
         from deja.eval import evaluate
         evaluate(golden_path=args.golden, limit=args.limit)
