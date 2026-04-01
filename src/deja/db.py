@@ -59,6 +59,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
         )
     """)
 
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
+        CREATE INDEX IF NOT EXISTS idx_chunks_project_time ON chunks(project_path, timestamp);
+    """)
+
     meta_defaults = {
         "schema_version": str(SCHEMA_VERSION),
         "embedding_model": EMBEDDING_MODEL,

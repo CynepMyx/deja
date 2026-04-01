@@ -79,7 +79,6 @@ Restart Claude Code — deja will appear as a connected MCP server.
 - `limit` (int, default 10) — max results
 - `project` (string, optional) — filter by project
 - `date_from` / `date_to` (string, optional) — ISO date range
-- `time_decay` (bool, default false) — boost recent results with log-decay scoring. Useful when history spans multiple months; with short history may hurt relevance
 
 ### Auto-indexing (optional)
 
