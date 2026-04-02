@@ -4,8 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deja"
-version = "0.2.0"
+version = "0.3.0"
 description = "Semantic search MCP server for Claude Code sessions"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [

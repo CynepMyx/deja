@@ -1,14 +1,18 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-04-02)
 
 ### Features
-- **`get_context` MCP tool** — retrieve a chunk with surrounding turns (±window) from the same session; no need to fetch entire session (#4)
-- **Secret filtering** — passwords, API keys, tokens, and private keys are redacted (`[REDACTED]`) during indexing (#5)
+- **`get_context` MCP tool** — retrieve a chunk with surrounding turns (±window) from the same session (#4)
+- **Secret filtering** — passwords, API keys, tokens, and private keys are redacted during indexing (#5)
+- **`deja redact`** — update secrets in existing index without re-embedding (seconds vs full reindex)
+- **`platformdirs`** — index stored in OS-standard location; auto-detects legacy `~/.claude/deja/` (#7)
 
 ### Tests
-- Added tests for get_context (window, not found)
-- Added tests for secret redaction (AWS, GitHub, Bearer, passwords, private keys)
+- Tests for get_context, secret redaction, redact command, stats health check (41 total)
+
+### CI
+- Upgraded to Node24 actions (checkout@v5, setup-python@v6, cache@v5)
 
 ## 0.2.0 (2026-04-02)
 
