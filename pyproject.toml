@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "deja"
+name = "dejasearch"
 version = "0.3.0"
 description = "Semantic search MCP server for Claude Code sessions"
 readme = "README.md"
