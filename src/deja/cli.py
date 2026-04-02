@@ -9,19 +9,13 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
 
 from deja.db import init_db, get_meta, SCHEMA_VERSION
 from deja.indexer import get_embedding_model, index_file, gc_orphans
-
-DEFAULT_INDEX_DIR = os.path.join(
-    os.path.expanduser("~"),
-    ".claude", "deja",
-)
-DEFAULT_INDEX_PATH = os.path.join(DEFAULT_INDEX_DIR, "index.db")
-LOCK_PATH = os.path.join(DEFAULT_INDEX_DIR, "index.lock")
-
-CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+from deja.config import get_index_dir, get_index_path, CLAUDE_PROJECTS_DIR
 
 def _acquire_lock():
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-    lock_fd = open(LOCK_PATH, "w")
+    index_dir = get_index_dir()
+    lock_path = os.path.join(index_dir, "index.lock")
+    os.makedirs(index_dir, exist_ok=True)
+    lock_fd = open(lock_path, "w")
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -35,9 +29,10 @@ def _acquire_lock():
     return lock_fd
 
 def _release_lock(lock_fd):
+    path = lock_fd.name
     lock_fd.close()
     try:
-        os.remove(LOCK_PATH)
+        os.remove(path)
     except OSError:
         pass
 
@@ -59,8 +54,10 @@ def _find_jsonl_files() -> list[tuple[str, str]]:
 def cmd_index(args):
     lock_fd = _acquire_lock()
     try:
-        os.makedirs(DEFAULT_INDEX_DIR, exist_ok=True)
-        conn = init_db(DEFAULT_INDEX_PATH)
+        index_dir = get_index_dir()
+        index_path = get_index_path()
+        os.makedirs(index_dir, exist_ok=True)
+        conn = init_db(index_path)
 
         meta = get_meta(conn)
         if args.reindex or int(meta.get("schema_version", "0")) != SCHEMA_VERSION:
@@ -94,11 +91,12 @@ def cmd_stats():
     import sqlite_vec
     from datetime import datetime
 
-    if not os.path.exists(DEFAULT_INDEX_PATH):
+    index_path = get_index_path()
+    if not os.path.exists(index_path):
         print("[deja] index not found. Run 'deja index' first.", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(DEFAULT_INDEX_PATH)
+    conn = sqlite3.connect(index_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -112,8 +110,8 @@ def cmd_stats():
 
     meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
 
-    db_size = os.path.getsize(DEFAULT_INDEX_PATH) / 1024 / 1024
-    db_mtime = datetime.fromtimestamp(os.path.getmtime(DEFAULT_INDEX_PATH)).strftime("%Y-%m-%d %H:%M")
+    db_size = os.path.getsize(index_path) / 1024 / 1024
+    db_mtime = datetime.fromtimestamp(os.path.getmtime(index_path)).strftime("%Y-%m-%d %H:%M")
 
     # Consistency check
     issues = []
@@ -138,7 +136,7 @@ def cmd_stats():
     print(f"Dim:        {meta.get('embedding_dim', '?')}")
     print(f"Schema:     v{meta.get('schema_version', '?')}")
     print(f"DB size:    {db_size:.1f} MB")
-    print(f"DB path:    {DEFAULT_INDEX_PATH}")
+    print(f"DB path:    {index_path}")
     print(f"Last index: {db_mtime}")
 
     if issues:
@@ -160,11 +158,12 @@ def cmd_search(args):
     from deja.indexer import get_embedding_model
     from deja.search import hybrid_search
 
-    if not os.path.exists(DEFAULT_INDEX_PATH):
+    index_path = get_index_path()
+    if not os.path.exists(index_path):
         print("[deja] index not found. Run 'deja index' first.", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(DEFAULT_INDEX_PATH, check_same_thread=False)
+    conn = sqlite3.connect(index_path, check_same_thread=False)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -192,11 +191,12 @@ def cmd_redact():
     import sqlite_vec
     from deja.secrets import redact
 
-    if not os.path.exists(DEFAULT_INDEX_PATH):
+    index_path = get_index_path()
+    if not os.path.exists(index_path):
         print("[deja] index not found.", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(DEFAULT_INDEX_PATH)
+    conn = sqlite3.connect(index_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

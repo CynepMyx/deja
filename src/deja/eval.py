@@ -7,9 +7,9 @@ import sqlite_vec
 
 from deja.indexer import get_embedding_model
 from deja.search import hybrid_search
+from deja.config import get_index_path
 
 DEFAULT_GOLDEN = os.path.join(os.path.dirname(__file__), "..", "..", "tests", "golden_pairs.json")
-DEFAULT_INDEX = os.path.join(os.path.expanduser("~"), ".claude", "deja", "index.db")
 
 
 def load_golden(path: str) -> list[dict]:
@@ -19,7 +19,7 @@ def load_golden(path: str) -> list[dict]:
 
 def evaluate(golden_path: str = None, index_path: str = None, limit: int = 5):
     golden_path = golden_path or DEFAULT_GOLDEN
-    index_path = index_path or DEFAULT_INDEX
+    index_path = index_path or get_index_path()
 
     if not os.path.exists(index_path):
         print(f"Index not found: {index_path}", file=sys.stderr)

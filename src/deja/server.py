@@ -9,11 +9,7 @@ from fastmcp.exceptions import ToolError
 from deja.db import open_db_readonly, get_meta, SCHEMA_VERSION
 from deja.indexer import get_embedding_model
 from deja.search import hybrid_search
-
-DEFAULT_INDEX_PATH = os.path.join(
-    os.path.expanduser("~"),
-    ".claude", "deja", "index.db",
-)
+from deja.config import get_index_path
 
 
 def _check_schema(conn):
@@ -28,7 +24,7 @@ def _check_schema(conn):
 
 @asynccontextmanager
 async def lifespan(server):
-    index_path = os.environ.get("DEJA_INDEX_PATH", DEFAULT_INDEX_PATH)
+    index_path = get_index_path()
     if not os.path.exists(index_path):
         print(f"[deja] index not found at {index_path}, search will fail", file=sys.stderr)
         yield {"model": None, "db": None}
