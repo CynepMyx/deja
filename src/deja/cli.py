@@ -187,6 +187,41 @@ def cmd_search(args):
 
     conn.close()
 
+def cmd_redact():
+    import sqlite3
+    import sqlite_vec
+    from deja.secrets import redact
+
+    if not os.path.exists(DEFAULT_INDEX_PATH):
+        print("[deja] index not found.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(DEFAULT_INDEX_PATH)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    rows = conn.execute("SELECT id, chunk_text, tool_result_text FROM chunks").fetchall()
+    updated = 0
+    for row_id, chunk_text, tool_text in rows:
+        new_chunk = redact(chunk_text)
+        new_tool = redact(tool_text) if tool_text else tool_text
+        if new_chunk != chunk_text or new_tool != tool_text:
+            conn.execute(
+                "UPDATE chunks SET chunk_text = ?, tool_result_text = ? WHERE id = ?",
+                (new_chunk, new_tool, row_id),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?, ?, ?)",
+                (row_id, new_chunk, new_tool or ""),
+            )
+            updated += 1
+
+    conn.commit()
+    conn.close()
+    print(f"[deja] redacted {updated} chunks (embeddings unchanged)", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="deja", description="Semantic search for Claude Code sessions")
     sub = parser.add_subparsers(dest="command")
@@ -203,6 +238,8 @@ def main():
     sr.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     sr.add_argument("--project", default=None, help="Filter by project path")
 
+    sub.add_parser("redact", help="Redact secrets in existing index (no re-embedding)")
+
     ev = sub.add_parser("eval", help="Evaluate search quality with golden pairs")
     ev.add_argument("--golden", default=None, help="Path to golden_pairs.json")
     ev.add_argument("--limit", type=int, default=5, help="Results per query (default: 5)")
@@ -216,6 +253,8 @@ def main():
         cmd_stats()
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "redact":
+        cmd_redact()
     elif args.command == "eval":
         from deja.eval import evaluate
         evaluate(golden_path=args.golden, limit=args.limit)

@@ -18,7 +18,7 @@
 
 ### Bug Fixes
 - **Incremental indexing correctness (P0)** — message_index no longer collides on incremental runs; dangling user at offset boundary no longer lost; stable upsert preserves rowid (#16)
-- **Streaming indexer** — process turns in batches (TURNS_PER_BATCH=50) instead of loading entire file into memory; ~50MB RAM instead of ~4GB for 86MB files (#9)
+- **Streaming indexer** — process turns in batches (TURNS_PER_BATCH=50) instead of loading entire file into memory (#9). Note: fastembed + ONNX runtime still uses ~3GB RAM for the model itself
 - **FTS query** — token-wise AND instead of exact phrase match; `nginx proxy` now finds results with both words in any order (#18)
 - **Search filters** — overfetch candidates (k=100) when project/date filters are active (#19)
 - **FastMCP upgrade** — use public `ctx.lifespan_context` API instead of private `_lifespan_result` (#10)

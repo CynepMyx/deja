@@ -28,9 +28,15 @@ PATTERNS = [
     re.compile(r'(?:cfut|sbp|glsa)_[A-Za-z0-9_\-]{20,}'),
     # Generic hex secrets (32+ chars, likely hashes/tokens)
     re.compile(r'(?i)(?:token|secret|key)\s*[:=]\s*["\']?([0-9a-f]{32,})["\']?'),
-    # Russian context: "пароль `X`" or "пароль: X"
+    # Russian context: "пароль `X`" or "пароль: X" or "пароль X"
     re.compile(r'пароль\s*[:]\s*[`\'"]?([A-Za-z0-9!@#$%^&*()_\-+=,.]{6,})[`\'"]?'),
     re.compile(r'пароль\s+`([^`]{6,})`'),
+    # sshpass -p 'SECRET'
+    re.compile(r'''sshpass\s+-p\s*['"]?([^\s'"]{6,})['"]?'''),
+    # URL credentials: proto://user:pass@host
+    re.compile(r'://[^:/@\s]+:([^@\s]{6,})@'),
+    # login / password pairs (slash separated)
+    re.compile(r'(?i)(?:логин|login)\s*/\s*\S+\s*/\s*(\S{6,})'),
 ]
 
 
