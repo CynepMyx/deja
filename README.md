@@ -1,8 +1,9 @@
 # deja
 
 [![CI](https://github.com/CynepMyx/deja/actions/workflows/ci.yml/badge.svg)](https://github.com/CynepMyx/deja/actions)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/dejasearch)](https://pypi.org/project/dejasearch/)
+[![Python](https://img.shields.io/pypi/pyversions/dejasearch)](https://pypi.org/project/dejasearch/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0id2hpdGUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjIiLz48L3N2Zz4=)](https://modelcontextprotocol.io/)
 
 > Semantic search over your Claude Code session history. Ask questions about past conversations by meaning, not just keywords.
@@ -30,11 +31,15 @@ Search combines vector KNN (semantic similarity) and FTS5 (keyword matching) via
 ## Install
 
 ```bash
+pip install dejasearch
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/CynepMyx/deja.git
 cd deja
-python -m venv .venv
-.venv/Scripts/pip install -e .        # Windows
-# .venv/bin/pip install -e .          # Linux/macOS
+pip install -e .
 ```
 
 First run downloads the embedding model (~117 MB).
@@ -72,6 +77,7 @@ Restart Claude Code — deja will appear as a connected MCP server.
 | Tool | Description |
 |------|-------------|
 | `search` | Hybrid semantic + keyword search across all sessions |
+| `get_context` | Get a chunk with surrounding turns (±window) |
 | `get_session_chunks` | Get indexed chunks for a session (not raw messages) |
 
 **search** parameters:
