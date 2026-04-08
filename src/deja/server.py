@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP, Context
@@ -22,6 +23,21 @@ def _check_schema(conn):
         )
 
 
+class _LazyModel:
+    def __init__(self):
+        self._model = None
+        self._lock = threading.Lock()
+
+    def get(self):
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    print("[deja] loading model...", file=sys.stderr)
+                    self._model = get_embedding_model()
+                    print("[deja] model ready", file=sys.stderr)
+        return self._model
+
+
 @asynccontextmanager
 async def lifespan(server):
     index_path = get_index_path()
@@ -30,12 +46,10 @@ async def lifespan(server):
         yield {"model": None, "db": None}
         return
 
-    print("[deja] loading model...", file=sys.stderr)
-    model = await asyncio.to_thread(get_embedding_model)
     db = open_db_readonly(index_path)
     _check_schema(db)
     print("[deja] ready", file=sys.stderr)
-    yield {"model": model, "db": db}
+    yield {"model": _LazyModel(), "db": db}
     db.close()
 
 
@@ -100,10 +114,11 @@ async def search(
 ) -> list[dict]:
     """Search past Claude Code sessions by meaning. Returns relevant conversation chunks with context."""
     lc = ctx.lifespan_context
-    model = lc.get("model")
+    lazy_model = lc.get("model")
     db = lc.get("db")
-    if model is None or db is None:
+    if lazy_model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
+    model = await asyncio.to_thread(lazy_model.get)
     return await asyncio.to_thread(_do_search, db, model, query, limit, project, date_from, date_to)
 
 
