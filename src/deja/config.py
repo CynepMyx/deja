@@ -5,6 +5,7 @@ APP_NAME = "deja"
 LEGACY_INDEX_DIR = os.path.join(os.path.expanduser("~"), ".claude", "deja")
 DEFAULT_INDEX_DIR = user_data_dir(APP_NAME, appauthor=False, ensure_exists=False)
 CLAUDE_PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+CODEX_SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
 
 
 def get_index_dir() -> str:

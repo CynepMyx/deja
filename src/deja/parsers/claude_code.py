@@ -1,8 +1,27 @@
+import glob
 import json
+import os
 import sys
-from typing import Generator
+from typing import Generator, Iterator
 
+from deja.config import CLAUDE_PROJECTS_DIR
+
+SOURCE = "claude-code"
 TOOL_RESULT_MAX = 2000
+
+
+def discover() -> Iterator[tuple[str, str]]:
+    """Walk ~/.claude/projects/<project>/*.jsonl, yield (path, project_dir)."""
+    if not os.path.isdir(CLAUDE_PROJECTS_DIR):
+        print(f"[deja] {CLAUDE_PROJECTS_DIR} not found", file=sys.stderr)
+        return
+
+    for project_dir in os.listdir(CLAUDE_PROJECTS_DIR):
+        full_project = os.path.join(CLAUDE_PROJECTS_DIR, project_dir)
+        if not os.path.isdir(full_project):
+            continue
+        for jsonl in glob.glob(os.path.join(full_project, "*.jsonl")):
+            yield jsonl, project_dir
 
 def extract_content(content) -> tuple[str, str]:
     if isinstance(content, str):
@@ -102,3 +121,6 @@ def get_file_end_offset(path: str) -> int:
     with open(path, "rb") as f:
         f.seek(0, 2)
         return f.tell()
+
+
+parse = parse_jsonl_file
