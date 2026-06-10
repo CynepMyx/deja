@@ -9,7 +9,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
 
 from deja.db import init_db, get_meta, SCHEMA_VERSION
 from deja.indexer import get_embedding_model, index_file, gc_orphans
-from deja.config import get_index_dir, get_index_path, CLAUDE_PROJECTS_DIR
+from deja.config import get_index_dir, get_index_path
+from deja.parsers.registry import all_sources, get_parser
 
 def _acquire_lock():
     index_dir = get_index_dir()
@@ -36,20 +37,15 @@ def _release_lock(lock_fd):
     except OSError:
         pass
 
-def _find_jsonl_files() -> list[tuple[str, str]]:
+def _collect_files(sources: list[str]) -> list[tuple[str, str, str]]:
+    """Return [(path, project_path, source), ...] across the requested sources."""
     results = []
-    if not os.path.isdir(CLAUDE_PROJECTS_DIR):
-        print(f"[deja] {CLAUDE_PROJECTS_DIR} not found", file=sys.stderr)
-        return results
-
-    for project_dir in os.listdir(CLAUDE_PROJECTS_DIR):
-        full_project = os.path.join(CLAUDE_PROJECTS_DIR, project_dir)
-        if not os.path.isdir(full_project):
-            continue
-        for jsonl in glob.glob(os.path.join(full_project, "*.jsonl")):
-            results.append((jsonl, project_dir))
-
+    for src in sources:
+        parser = get_parser(src)
+        for path, project_path in parser.discover():
+            results.append((path, project_path, src))
     return results
+
 
 def cmd_index(args):
     lock_fd = _acquire_lock()
@@ -68,17 +64,23 @@ def cmd_index(args):
             conn.execute("DELETE FROM indexed_files")
             conn.commit()
 
+        sources = all_sources() if args.source == "all" else [args.source]
+        print(f"[deja] sources: {', '.join(sources)}", file=sys.stderr)
+
         print("[deja] loading embedding model...", file=sys.stderr)
         model = get_embedding_model()
 
-        files = _find_jsonl_files()
+        files = _collect_files(sources)
         print(f"[deja] found {len(files)} JSONL files", file=sys.stderr)
 
         known_paths = set()
-        for i, (path, project) in enumerate(files):
+        for i, (path, project, src) in enumerate(files):
             known_paths.add(path)
-            print(f"[deja] [{i+1}/{len(files)}] {os.path.basename(path)}", file=sys.stderr)
-            index_file(conn, model, path, project)
+            print(
+                f"[deja] [{i+1}/{len(files)}] [{src}] {os.path.basename(path)}",
+                file=sys.stderr,
+            )
+            index_file(conn, model, path, project, source=src)
 
         gc_orphans(conn, known_paths)
         conn.close()
@@ -228,6 +230,12 @@ def main():
 
     idx = sub.add_parser("index", help="Index JSONL session files")
     idx.add_argument("--reindex", action="store_true", help="Force full reindex")
+    idx.add_argument(
+        "--source",
+        default="all",
+        choices=["all", *all_sources()],
+        help="Which source(s) to index (default: all)",
+    )
 
     sub.add_parser("serve", help="Start MCP server (stdio)")
 

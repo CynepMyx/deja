@@ -4,7 +4,7 @@ from itertools import islice
 from fastembed import TextEmbedding
 from fastembed.text.text_embedding import PoolingType, ModelSource
 from deja.db import serialize_f32
-from deja.parser import parse_jsonl_file
+from deja.parsers.registry import get_parser
 from deja.chunker import make_chunks
 from deja.secrets import redact
 
@@ -77,7 +77,13 @@ def _iter_batches(iterator, size):
             break
         yield batch
 
-def index_file(conn, model: TextEmbedding, path: str, project_path: str):
+def index_file(
+    conn,
+    model: TextEmbedding,
+    path: str,
+    project_path: str,
+    source: str = "claude-code",
+):
     session_id = os.path.splitext(os.path.basename(path))[0]
     needs = check_needs_reindex(conn, path)
 
@@ -92,13 +98,14 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
     elif needs == "incremental":
         offset, start_message_index = _get_resume_state(conn, session_id, path)
 
-    turns_gen = parse_jsonl_file(path, offset=offset, start_message_index=start_message_index)
+    parser = get_parser(source)
+    turns_gen = parser.parse(path, offset=offset, start_message_index=start_message_index)
     indexed_any = False
 
     for batch_turns in _iter_batches(turns_gen, TURNS_PER_BATCH):
         chunks = []
         for turn in batch_turns:
-            chunks.extend(make_chunks(turn, session_id, project_path))
+            chunks.extend(make_chunks(turn, session_id, project_path, source=source))
 
         if not chunks:
             continue
