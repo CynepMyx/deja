@@ -4,7 +4,7 @@ import os
 import sys
 from typing import Generator, Iterator
 
-from deja.config import CODEX_SESSIONS_DIR
+from deja import config
 
 SOURCE = "codex"
 TOOL_RESULT_MAX = 2000
@@ -18,10 +18,11 @@ def discover() -> Iterator[tuple[str, str]]:
     filesystem tree directly rather than trusting session_index.jsonl,
     which can drift (per clean-my-agent maintainer's note on #8).
     """
-    if not os.path.isdir(CODEX_SESSIONS_DIR):
+    root = config.CODEX_SESSIONS_DIR
+    if not os.path.isdir(root):
         return
 
-    pattern = os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl")
+    pattern = os.path.join(root, "**", "*.jsonl")
     for path in glob.iglob(pattern, recursive=True):
         if os.path.basename(path) == "session_index.jsonl":
             continue
