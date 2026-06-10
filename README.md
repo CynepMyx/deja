@@ -6,9 +6,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0id2hpdGUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41Ii8+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjIiLz48L3N2Zz4=)](https://modelcontextprotocol.io/)
 
-> Semantic search over your Claude Code session history. Ask questions about past conversations by meaning, not just keywords.
+> Semantic search over your AI coding agent session history. Ask questions about past conversations by meaning, not just keywords.
 
-**deja** is an [MCP server](https://modelcontextprotocol.io/) that indexes Claude Code JSONL sessions and provides hybrid search (vector + full-text) directly from Claude Code.
+**deja** is an [MCP server](https://modelcontextprotocol.io/) that indexes JSONL sessions from supported AI coding agents and provides hybrid search (vector + full-text) directly from Claude Code.
+
+## Supported sources
+
+| Source | Path | Status |
+|--------|------|--------|
+| Claude Code | `~/.claude/projects/*/*.jsonl` | Supported |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Supported (v0.4+) |
+| Cursor / Gemini / OpenCode | — | Planned ([#8](https://github.com/CynepMyx/deja/issues/8)) |
 
 ## How it works
 
@@ -49,11 +57,13 @@ First run downloads the embedding model (~117 MB).
 ### Build the index
 
 ```bash
-deja index              # incremental — only new/changed files
-deja index --reindex    # full rebuild
+deja index                       # incremental, all sources
+deja index --reindex             # full rebuild
+deja index --source claude-code  # only Claude Code sessions
+deja index --source codex        # only Codex CLI sessions
 ```
 
-Scans all `~/.claude/projects/*/*.jsonl` files.
+Scans every supported source by default. Filter with `--source`.
 
 ### Add to Claude Code
 
@@ -84,6 +94,7 @@ Restart Claude Code — deja will appear as a connected MCP server.
 - `query` (string) — what to search for
 - `limit` (int, default 10) — max results
 - `project` (string, optional) — filter by project
+- `source` (string, optional) — filter by source: `claude-code`, `codex`
 - `date_from` / `date_to` (string, optional) — ISO date range
 
 ### Auto-indexing (optional)
