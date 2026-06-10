@@ -138,14 +138,16 @@ def _upsert_chunk(conn, chunk: dict, embedding):
         (chunk["session_id"], chunk["message_index"], chunk["split_index"]),
     ).fetchone()
 
+    source = chunk.get("source", "claude-code")
     if row:
         chunk_id = row[0]
         conn.execute(
             """UPDATE chunks SET timestamp = ?, project_path = ?,
-               chunk_text = ?, tool_result_text = ?
+               chunk_text = ?, tool_result_text = ?, source = ?
                WHERE id = ?""",
             (chunk["timestamp"], chunk["project_path"],
-             chunk["chunk_text"], chunk.get("tool_result_text", ""), chunk_id),
+             chunk["chunk_text"], chunk.get("tool_result_text", ""),
+             source, chunk_id),
         )
         conn.execute(
             "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
@@ -158,11 +160,11 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     else:
         cursor = conn.execute(
             """INSERT INTO chunks
-            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (chunk["session_id"], chunk["message_index"], chunk["split_index"],
              chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
-             chunk.get("tool_result_text", "")),
+             chunk.get("tool_result_text", ""), source),
         )
         chunk_id = cursor.lastrowid
         conn.execute(

@@ -1,6 +1,6 @@
 import os
 import tempfile
-from deja.db import init_db, get_meta
+from deja.db import init_db, get_meta, SCHEMA_VERSION
 
 def test_init_db_creates_tables():
     with tempfile.TemporaryDirectory() as tmp:
@@ -21,7 +21,7 @@ def test_meta_table_has_schema_version():
         db_path = os.path.join(tmp, "test.db")
         conn = init_db(db_path)
         meta = get_meta(conn)
-        assert meta["schema_version"] == "1"
+        assert meta["schema_version"] == str(SCHEMA_VERSION)
         assert meta["embedding_model"] == "intfloat/multilingual-e5-small"
         assert meta["embedding_dim"] == "384"
         conn.close()
