@@ -56,9 +56,10 @@ async def lifespan(server):
 mcp = FastMCP("deja", lifespan=lifespan)
 
 
-def _do_search(conn, model, query, limit=10, project=None, date_from=None, date_to=None):
+def _do_search(conn, model, query, limit=10, project=None, source=None, date_from=None, date_to=None):
     return hybrid_search(conn, model, query, limit=limit,
-                         project=project, date_from=date_from, date_to=date_to)
+                         project=project, source=source,
+                         date_from=date_from, date_to=date_to)
 
 
 def _do_get_session(conn, session_id):
@@ -108,18 +109,22 @@ async def search(
     query: str,
     limit: int = 10,
     project: str = None,
+    source: str = None,
     date_from: str = None,
     date_to: str = None,
     ctx: Context = None,
 ) -> list[dict]:
-    """Search past Claude Code sessions by meaning. Returns relevant conversation chunks with context."""
+    """Search past AI agent sessions by meaning. Returns relevant conversation chunks with context.
+
+    source: optional filter, e.g. 'claude-code' or 'codex'.
+    """
     lc = ctx.lifespan_context
     lazy_model = lc.get("model")
     db = lc.get("db")
     if lazy_model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     model = await asyncio.to_thread(lazy_model.get)
-    return await asyncio.to_thread(_do_search, db, model, query, limit, project, date_from, date_to)
+    return await asyncio.to_thread(_do_search, db, model, query, limit, project, source, date_from, date_to)
 
 
 @mcp.tool()

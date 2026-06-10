@@ -173,17 +173,21 @@ def cmd_search(args):
     print("Loading model...", file=sys.stderr)
     model = get_embedding_model()
 
-    results = hybrid_search(conn, model, args.query, limit=args.limit, project=args.project)
+    results = hybrid_search(
+        conn, model, args.query, limit=args.limit,
+        project=args.project, source=args.source,
+    )
 
     if not results:
         print("No results found.")
     else:
         for i, r in enumerate(results, 1):
             score = r.get("score", 0)
+            src = r.get("source", "?")
             sid = r.get("session_id", "?")[:12]
             ts = r.get("timestamp", "")[:19]
             text = r.get("chunk_text", "")[:200].replace("\n", " ")
-            print(f"\n[{i}] score={score:.4f} | {sid} | {ts}")
+            print(f"\n[{i}] score={score:.4f} | [{src}] {sid} | {ts}")
             print(f"    {text}")
 
     conn.close()
@@ -245,6 +249,12 @@ def main():
     sr.add_argument("query", help="Search query")
     sr.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     sr.add_argument("--project", default=None, help="Filter by project path")
+    sr.add_argument(
+        "--source",
+        default=None,
+        choices=all_sources(),
+        help="Filter by source (claude-code, codex, ...)",
+    )
 
     sub.add_parser("redact", help="Redact secrets in existing index (no re-embedding)")
 
