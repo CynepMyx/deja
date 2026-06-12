@@ -82,7 +82,7 @@ def cmd_index(args):
             )
             index_file(conn, model, path, project, source=src)
 
-        gc_orphans(conn, known_paths)
+        gc_orphans(conn, known_paths, sources=sources)
         conn.close()
         print("[deja] indexing complete", file=sys.stderr)
     finally:

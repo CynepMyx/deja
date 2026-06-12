@@ -129,12 +129,12 @@ def index_file(
         # Commit after each batch — crash-safe resume from last committed offset
         batch_offset = batch_turns[-1].get("completed_offset", None)
         if batch_offset:
-            _update_file_meta(conn, path, batch_offset)
+            _update_file_meta(conn, path, batch_offset, source=source)
         conn.commit()
         indexed_any = True
 
     if not indexed_any:
-        _update_file_meta(conn, path, offset)
+        _update_file_meta(conn, path, offset, source=source)
         conn.commit()
 
 def _upsert_chunk(conn, chunk: dict, embedding):
@@ -183,17 +183,29 @@ def _upsert_chunk(conn, chunk: dict, embedding):
             (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
         )
 
-def _update_file_meta(conn, path: str, completed_offset: int = None):
+def _update_file_meta(conn, path: str, completed_offset: int = None, source: str = "claude-code"):
     stat = os.stat(path)
     offset = completed_offset if completed_offset else stat.st_size
     conn.execute(
-        """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size)
-        VALUES (?, ?, ?, ?)""",
-        (path, offset, stat.st_mtime, stat.st_size),
+        """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size, source)
+        VALUES (?, ?, ?, ?, ?)""",
+        (path, offset, stat.st_mtime, stat.st_size, source),
     )
 
-def gc_orphans(conn, known_paths: set[str]):
-    indexed = conn.execute("SELECT path FROM indexed_files").fetchall()
+def gc_orphans(conn, known_paths: set[str], sources: list[str] = None):
+    """Remove index entries for files that no longer exist on disk.
+
+    `sources` limits gc to files indexed from those sources — a partial run
+    (`deja index --source codex`) must not treat other sources' files as orphans.
+    """
+    if sources is None:
+        indexed = conn.execute("SELECT path FROM indexed_files").fetchall()
+    else:
+        placeholders = ",".join("?" * len(sources))
+        indexed = conn.execute(
+            f"SELECT path FROM indexed_files WHERE source IN ({placeholders})",
+            sources,
+        ).fetchall()
     for (path,) in indexed:
         if path not in known_paths:
             session_id = os.path.splitext(os.path.basename(path))[0]

@@ -3,7 +3,7 @@ import os
 import time
 import tempfile
 from deja.db import init_db
-from deja.indexer import index_file, get_embedding_model, check_needs_reindex
+from deja.indexer import index_file, get_embedding_model, check_needs_reindex, gc_orphans
 
 def _make_session(tmp, filename, lines):
     path = os.path.join(tmp, filename)
@@ -183,4 +183,46 @@ def test_row_consistency_chunks_vec_fts():
         ).fetchone()[0]
         assert orphan_vec == 0, f"Found {orphan_vec} orphan vec rows"
 
+        conn.close()
+
+def test_gc_orphans_scoped_to_sources():
+    """Partial run (--source codex) must not treat other sources' files as orphans."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "cc-sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hello"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "world"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj", source="claude-code")
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1
+
+        # gc scoped to codex: claude-code file is NOT in known_paths but must survive
+        gc_orphans(conn, set(), sources=["codex"])
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 1
+
+        # gc scoped to claude-code: now it is a real orphan and gets removed
+        gc_orphans(conn, set(), sources=["claude-code"])
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 0
+
+        conn.close()
+
+def test_gc_orphans_unscoped_removes_all():
+    """sources=None keeps the old global behaviour (full `deja index` run)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "cc-sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hello"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "world"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj", source="claude-code")
+
+        gc_orphans(conn, set())
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 0
         conn.close()
