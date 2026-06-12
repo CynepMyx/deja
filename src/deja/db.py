@@ -1,5 +1,7 @@
 import sqlite3
 import struct
+import sys
+
 import sqlite_vec
 
 SCHEMA_VERSION = 2
@@ -8,6 +10,38 @@ EMBEDDING_DIM = 384
 
 def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
+
+def _migrate_if_needed(conn: sqlite3.Connection):
+    """Drop index tables when the on-disk schema version differs.
+
+    Tables are recreated by init_db right after; data is rebuilt by the
+    next `deja index`. Must run before any DDL that references new columns.
+    """
+    has_meta = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+    ).fetchone()
+    if not has_meta:
+        return
+
+    db_version = int(get_meta(conn).get("schema_version", "0"))
+    if db_version == SCHEMA_VERSION:
+        return
+
+    print(
+        f"[deja] schema v{db_version} -> v{SCHEMA_VERSION}: "
+        "rebuilding index tables, run 'deja index' to repopulate",
+        file=sys.stderr,
+    )
+    conn.executescript("""
+        DROP TABLE IF EXISTS chunks;
+        DROP TABLE IF EXISTS indexed_files;
+        DROP TABLE IF EXISTS chunks_vec;
+        DROP TABLE IF EXISTS chunks_fts;
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
 
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
@@ -18,6 +52,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 5000")
+
+    _migrate_if_needed(conn)
 
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS chunks (
@@ -37,7 +73,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             path TEXT PRIMARY KEY,
             last_offset INTEGER NOT NULL DEFAULT 0,
             last_mtime REAL NOT NULL,
-            last_size INTEGER NOT NULL
+            last_size INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'claude-code'
         );
 
         CREATE TABLE IF NOT EXISTS meta (
