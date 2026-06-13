@@ -249,3 +249,47 @@ def test_file_with_only_dangling_user_indexed_later():
         texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()]
         assert any("lonely" in t for t in texts), "Dangling-only turn must be indexed after assistant arrives"
         conn.close()
+
+
+def _codex_user(text, ts="2026-06-01T10:00:00Z"):
+    return {"type": "response_item", "timestamp": ts,
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": text}]}}
+
+def _codex_asst(text, ts="2026-06-01T10:00:05Z"):
+    return {"type": "response_item", "timestamp": ts,
+            "payload": {"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}]}}
+
+def test_codex_live_session_tail_grows_without_duplicates():
+    """Provisional last turn is re-upserted fuller on next run (B3)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "rollout-x.jsonl", [
+            {"type": "session_meta", "payload": {"cwd": "/proj"}},
+            _codex_user("question one"),
+            _codex_asst("answer part one"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
+        assert any("part one" in t for t in texts)
+
+        time.sleep(0.1)
+        _append_lines(path, [
+            _codex_asst("answer part two"),
+            _codex_user("question two", ts="2026-06-01T11:00:00Z"),
+            _codex_asst("answer two", ts="2026-06-01T11:00:05Z"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+
+        rows = conn.execute(
+            "SELECT message_index, chunk_text FROM chunks ORDER BY message_index, split_index"
+        ).fetchall()
+        turn0 = " ".join(t for i, t in rows if i == 0)
+        assert "part one" in turn0 and "part two" in turn0, "Tail of live turn must be re-indexed"
+        assert any("answer two" in t for _, t in rows), "Next turn must be indexed"
+        indices = sorted({i for i, _ in rows})
+        assert indices == [0, 1], f"No duplicate/skipped message_index, got {indices}"
+        conn.close()

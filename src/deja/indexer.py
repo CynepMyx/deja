@@ -55,18 +55,34 @@ def _delete_file_chunks(conn, session_id: str):
         conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
     conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
 
+def _delete_chunks_from(conn, session_id: str, from_index: int):
+    ids = conn.execute(
+        "SELECT id FROM chunks WHERE session_id = ? AND message_index >= ?",
+        (session_id, from_index),
+    ).fetchall()
+    for (cid,) in ids:
+        conn.execute("DELETE FROM chunks_vec WHERE rowid = ?", (cid,))
+        conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
+    conn.execute(
+        "DELETE FROM chunks WHERE session_id = ? AND message_index >= ?",
+        (session_id, from_index),
+    )
+
 def _get_resume_state(conn, session_id: str, path: str) -> tuple[int, int]:
     row = conn.execute(
-        "SELECT last_offset FROM indexed_files WHERE path = ?", (path,)
+        "SELECT last_offset, next_message_index FROM indexed_files WHERE path = ?",
+        (path,),
     ).fetchone()
-    offset = row[0] if row else 0
-
-    row = conn.execute(
-        "SELECT MAX(message_index) FROM chunks WHERE session_id = ?",
-        (session_id,),
+    if row is None:
+        return 0, 0
+    offset = row[0]
+    if row[1] is not None:
+        return offset, row[1]
+    # legacy rows without next_message_index: derive from chunks
+    row2 = conn.execute(
+        "SELECT MAX(message_index) FROM chunks WHERE session_id = ?", (session_id,)
     ).fetchone()
-    start_idx = (row[0] + 1) if row and row[0] is not None else 0
-
+    start_idx = (row2[0] + 1) if row2 and row2[0] is not None else 0
     return offset, start_idx
 
 def _iter_batches(iterator, size):
@@ -97,6 +113,7 @@ def index_file(
         _delete_file_chunks(conn, session_id)
     elif needs == "incremental":
         offset, start_message_index = _get_resume_state(conn, session_id, path)
+        _delete_chunks_from(conn, session_id, start_message_index)
 
     parser = get_parser(source)
     turns_gen = parser.parse(path, offset=offset, start_message_index=start_message_index)
@@ -127,14 +144,16 @@ def index_file(
                 print(f"[deja] error inserting chunk: {e}", file=sys.stderr)
 
         # Commit after each batch — crash-safe resume from last committed offset
-        batch_offset = batch_turns[-1].get("completed_offset", None)
-        if batch_offset:
-            _update_file_meta(conn, path, batch_offset, source=source)
+        last = batch_turns[-1]
+        batch_offset = last.get("completed_offset", None)
+        next_idx = last["message_index"] if last.get("provisional") else last["message_index"] + 1
+        if batch_offset is not None:
+            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx)
         conn.commit()
         indexed_any = True
 
     if not indexed_any:
-        _update_file_meta(conn, path, offset, source=source)
+        _update_file_meta(conn, path, offset, source=source, next_message_index=start_message_index)
         conn.commit()
 
 def _upsert_chunk(conn, chunk: dict, embedding):
@@ -183,13 +202,15 @@ def _upsert_chunk(conn, chunk: dict, embedding):
             (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
         )
 
-def _update_file_meta(conn, path: str, completed_offset: int = None, source: str = "claude-code"):
+def _update_file_meta(conn, path: str, completed_offset: int = None,
+                      source: str = "claude-code", next_message_index: int = None):
     stat = os.stat(path)
     offset = completed_offset if completed_offset is not None else stat.st_size
     conn.execute(
-        """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size, source)
-        VALUES (?, ?, ?, ?, ?)""",
-        (path, offset, stat.st_mtime, stat.st_size, source),
+        """INSERT OR REPLACE INTO indexed_files
+           (path, last_offset, last_mtime, last_size, source, next_message_index)
+        VALUES (?, ?, ?, ?, ?, ?)""",
+        (path, offset, stat.st_mtime, stat.st_size, source, next_message_index),
     )
 
 def gc_orphans(conn, known_paths: set[str], sources: list[str] = None):

@@ -74,7 +74,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             last_offset INTEGER NOT NULL DEFAULT 0,
             last_mtime REAL NOT NULL,
             last_size INTEGER NOT NULL,
-            source TEXT NOT NULL DEFAULT 'claude-code'
+            source TEXT NOT NULL DEFAULT 'claude-code',
+            next_message_index INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS meta (

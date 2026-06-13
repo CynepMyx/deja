@@ -105,7 +105,7 @@ def parse(
     asst_parts: list[str] = []
     tool_parts: list[str] = []
     pending_ts = ""
-    pending_user_line_start = offset
+    turn_start = offset
     message_index = start_message_index
 
     with open(path, "r", encoding="utf-8") as f:
@@ -146,7 +146,7 @@ def parse(
                 asst_parts = []
                 tool_parts = []
                 pending_ts = ts
-                pending_user_line_start = line_start
+                turn_start = line_start
 
             elif ptype == "message" and role == "assistant":
                 if pending_user is None:
@@ -169,7 +169,9 @@ def parse(
             # developer messages, etc.
 
         if pending_user is not None and asst_parts:
-            yield _build_turn(
+            turn = _build_turn(
                 pending_user, asst_parts, tool_parts,
-                pending_ts, message_index, f.tell(),
+                pending_ts, message_index, turn_start,
             )
+            turn["provisional"] = True
+            yield turn

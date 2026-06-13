@@ -236,3 +236,28 @@ def test_malformed_line_skipped():
         turns = list(codex.parse(path))
         assert len(turns) == 1
         assert "hi" in turns[0]["user_text"]
+
+
+def test_eof_turn_is_provisional_with_turn_start_offset():
+    lines = [
+        {"type": "session_meta", "payload": {"cwd": "/proj"}},
+        {"type": "response_item", "timestamp": "2026-06-01T10:00:00Z",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "first q"}]}},
+        {"type": "response_item", "timestamp": "2026-06-01T10:00:05Z",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "partial answer"}]}},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "rollout.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+
+        turns = list(codex.parse(path))
+        assert len(turns) == 1
+        assert turns[0].get("provisional") is True
+        again = list(codex.parse(path, offset=turns[0]["completed_offset"],
+                                 start_message_index=turns[0]["message_index"]))
+        assert len(again) == 1
+        assert again[0]["user_text"] == "first q"
