@@ -434,3 +434,21 @@ def test_secret_at_chunk_boundary_not_leaked():
         for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
             assert "SuperBoundarySecret" not in text
         conn.close()
+
+
+def test_long_private_key_split_across_chunks_not_leaked():
+    """Key body >> OVERLAP: only chunk 0 carries the BEGIN anchor; per-chunk
+    redaction would leak the body in later chunks. Guards redact-before-split."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        long_text = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "M" * 2000
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "show key"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
+            assert "MMMM" not in text, "Key body must not survive in any chunk"
+        conn.close()
