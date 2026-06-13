@@ -226,3 +226,26 @@ def test_gc_orphans_unscoped_removes_all():
         assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 0
         conn.close()
+
+def test_file_with_only_dangling_user_indexed_later():
+    """File containing only a user message must not be marked fully indexed (C1)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "lonely question"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+        ])
+        index_file(conn, model, path, "proj")
+        # offset must be 0, not file size
+        row = conn.execute("SELECT last_offset FROM indexed_files WHERE path = ?", (path,)).fetchone()
+        assert row[0] == 0, f"Expected offset 0 for unindexed dangling user, got {row[0]}"
+
+        time.sleep(0.1)
+        _append_lines(path, [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "late answer"}]}, "timestamp": "2026-01-01T00:00:05Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()]
+        assert any("lonely" in t for t in texts), "Dangling-only turn must be indexed after assistant arrives"
+        conn.close()

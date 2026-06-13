@@ -185,7 +185,7 @@ def _upsert_chunk(conn, chunk: dict, embedding):
 
 def _update_file_meta(conn, path: str, completed_offset: int = None, source: str = "claude-code"):
     stat = os.stat(path)
-    offset = completed_offset if completed_offset else stat.st_size
+    offset = completed_offset if completed_offset is not None else stat.st_size
     conn.execute(
         """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size, source)
         VALUES (?, ?, ?, ?, ?)""",
