@@ -69,51 +69,49 @@ def test_safe_reindex_on_truncation():
         conn.close()
 
 def test_incremental_append_no_collision():
-    """New turns appended to file get correct message_index, not colliding with old ones."""
+    """New turns appended to file get correct message_index; completed turns keep stable ids.
+
+    Note: the LAST turn of a file is provisional (re-upserted fuller on next run),
+    so only chunks below next_message_index are guaranteed id-stable.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.db")
         conn = init_db(db_path)
         model = get_embedding_model()
 
-        # Index first turn
+        # Run 1: turn 0 completes (user2 follows it), turn 1 is the provisional tail
         path = _make_session(tmp, "sess.jsonl", [
             {"type": "user", "message": {"content": [{"type": "text", "text": "first question"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "first answer"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
-        ])
-        index_file(conn, model, path, "proj")
-        count1 = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        assert count1 >= 1
-
-        old_ids = {r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()}
-        old_texts = {r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()}
-        assert any("first" in t for t in old_texts)
-
-        # Append second turn
-        time.sleep(0.1)  # ensure mtime changes
-        _append_lines(path, [
             {"type": "user", "message": {"content": [{"type": "text", "text": "second question"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "second answer"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "4"},
         ])
-
         index_file(conn, model, path, "proj")
-        count2 = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        assert count2 >= 2, f"Expected at least 2 chunks, got {count2}"
+        turn0_ids = {r[0] for r in conn.execute(
+            "SELECT id FROM chunks WHERE message_index = 0").fetchall()}
+        assert turn0_ids, "turn 0 must be indexed"
 
-        # Old chunks must still exist with same IDs
-        new_ids = {r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()}
-        assert old_ids.issubset(new_ids), "Old chunk IDs should be preserved"
+        # Run 2: append turn 2; turn 1 (was provisional) is re-upserted, turn 0 untouched
+        time.sleep(0.1)
+        _append_lines(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "third question"}]}, "timestamp": "2026-01-01T00:02:00Z", "uuid": "5"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "third answer"}]}, "timestamp": "2026-01-01T00:02:01Z", "uuid": "6"},
+        ])
+        index_file(conn, model, path, "proj")
 
-        # Both turns must be present
-        all_texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
-        assert any("first" in t for t in all_texts), "First turn should still exist"
-        assert any("second" in t for t in all_texts), "Second turn should be added"
+        turn0_ids_after = {r[0] for r in conn.execute(
+            "SELECT id FROM chunks WHERE message_index = 0").fetchall()}
+        assert turn0_ids_after == turn0_ids, "Completed turns below next_message_index must keep stable ids"
 
-        # message_index should be distinct
+        all_texts = [r[0] for r in conn.execute(
+            "SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
+        assert any("first" in t for t in all_texts)
+        assert any("second" in t for t in all_texts)
+        assert any("third" in t for t in all_texts)
+
         indices = [r[0] for r in conn.execute(
-            "SELECT DISTINCT message_index FROM chunks ORDER BY message_index"
-        ).fetchall()]
-        assert len(indices) >= 2, f"Expected distinct message indices, got {indices}"
-        assert indices[0] != indices[1], "Message indices must not collide"
+            "SELECT DISTINCT message_index FROM chunks ORDER BY message_index").fetchall()]
+        assert indices == [0, 1, 2], f"Expected message indices [0, 1, 2], got {indices}"
 
         conn.close()
 
