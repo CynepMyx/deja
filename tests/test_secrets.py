@@ -1,3 +1,5 @@
+import pytest
+
 from deja.secrets import redact, REDACTED
 
 
@@ -54,3 +56,25 @@ def test_truncated_private_key_redacted():
     result = redact(text)
     assert "AAAA" not in result
     assert REDACTED in result
+
+
+@pytest.mark.parametrize("token", [
+    "sk-ant-api03-AbCdEf123456789012345678901234",
+    "sk-proj-AbCdEf12345678901234567890",
+    "dop_v1_151a47ab23c4def567890abcdef1234567890abcd",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpM",
+    "AIzaSyA-1234567890abcdefghijklmnopqrstuv",
+    "sk_live_4eC39HqLyjWDarjtT1zdp7dc12345",
+    "1234567890:AAEhBOweik6ad9r_QXMENQjcrGbqCr4K-pc",
+    "npm_AbCd1234567890efGhIjKlMnOpQrStUvWx",
+])
+def test_redact_bare_tokens(token):
+    text = f"env output:\n{token}\nnext line"
+    result = redact(text)
+    assert token not in result, f"Bare token leaked: {token[:12]}..."
+    assert REDACTED in result
+
+
+def test_redact_still_preserves_normal_text():
+    text = "Fix the skirt-and-blouse layout for nginx proxy in project alpha"
+    assert redact(text) == text
