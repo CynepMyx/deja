@@ -357,6 +357,45 @@ def test_provisional_turn_shrink_clears_stale_splits():
         conn.close()
 
 
+def test_growth_during_parse_detected_next_run(monkeypatch):
+    """File growth DURING parsing must leave meta stale so the next run reindexes (m2)."""
+    from deja.parsers import claude_code
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+
+        real_parse = claude_code.parse_jsonl_file
+
+        def growing_parse(p, offset=0, start_message_index=0):
+            yield from real_parse(p, offset=offset, start_message_index=start_message_index)
+            # file grows AFTER the parser finished reading but BEFORE meta is written
+            _append_lines(p, [
+                {"type": "user", "message": {"content": [{"type": "text", "text": "q2 grown"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "a2 grown"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "4"},
+            ])
+
+        monkeypatch.setattr(claude_code, "parse_jsonl_file", growing_parse)
+        monkeypatch.setattr(claude_code, "parse", growing_parse)
+        index_file(conn, model, path, "proj")
+        monkeypatch.undo()
+
+        # with the pre-parse stat recorded, the next run MUST see the growth
+        from deja.indexer import check_needs_reindex
+        needs = check_needs_reindex(conn, path)
+        assert needs != False, "Growth during parse must trigger reindex on next run"
+
+        index_file(conn, model, path, "proj")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()]
+        assert any("grown" in t for t in texts), "Turn appended during parse must be indexed by next run"
+        conn.close()
+
+
 def test_file_meta_uses_preparse_stat():
     """Growth during indexing must be picked up by the next run (m2)."""
     with tempfile.TemporaryDirectory() as tmp:
