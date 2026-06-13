@@ -417,3 +417,20 @@ def test_file_meta_uses_preparse_stat():
         row = conn.execute("SELECT last_size FROM indexed_files WHERE path = ?", (path,)).fetchone()
         assert row[0] == stat_before.st_size, "Meta must record pre-parse size so growth triggers reindex"
         conn.close()
+
+
+def test_secret_at_chunk_boundary_not_leaked():
+    secret = "password=SuperBoundarySecret99"
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        long_text = "x" * 1495 + " " + secret + " " + "y" * 1500
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "long"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
+            assert "SuperBoundarySecret" not in text
+        conn.close()

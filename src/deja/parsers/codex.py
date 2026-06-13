@@ -5,6 +5,7 @@ import sys
 from typing import Generator, Iterator
 
 from deja import config
+from deja.secrets import redact_turn
 
 SOURCE = "codex"
 TOOL_RESULT_MAX = 2000
@@ -69,7 +70,7 @@ def _format_tool_output(payload: dict) -> str:
         output = output.get("content") or json.dumps(output, ensure_ascii=False)
     elif isinstance(output, list):
         output = json.dumps(output, ensure_ascii=False)
-    return str(output)[:TOOL_RESULT_MAX]
+    return str(output)
 
 
 def _build_turn(
@@ -81,14 +82,17 @@ def _build_turn(
     completed_offset: int,
 ) -> dict:
     combined_tool = "\n".join(p for p in tool_parts if p)
-    return {
+    turn = {
         "user_text": user_text,
         "assistant_text": "\n\n".join(p for p in asst_parts if p),
-        "tool_result_text": combined_tool[:TOOL_RESULT_MAX],
+        "tool_result_text": combined_tool,
         "timestamp": timestamp,
         "message_index": message_index,
         "completed_offset": completed_offset,
     }
+    turn = redact_turn(turn)
+    turn["tool_result_text"] = turn["tool_result_text"][:TOOL_RESULT_MAX]
+    return turn
 
 
 def parse(

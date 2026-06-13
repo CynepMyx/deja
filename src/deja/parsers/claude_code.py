@@ -5,6 +5,7 @@ import sys
 from typing import Generator, Iterator
 
 from deja.config import CLAUDE_PROJECTS_DIR
+from deja.secrets import redact_turn
 
 SOURCE = "claude-code"
 TOOL_RESULT_MAX = 2000
@@ -52,7 +53,7 @@ def extract_content(content) -> tuple[str, str]:
                     b.get("text", "") for b in raw if isinstance(b, dict)
                 )
             if isinstance(raw, str):
-                tool_result_parts.append(raw[:TOOL_RESULT_MAX])
+                tool_result_parts.append(raw)
 
         elif block_type == "thinking":
             continue
@@ -76,13 +77,15 @@ def parse_jsonl_file(
         turn = {
             "user_text": pending_user["text"],
             "assistant_text": "\n\n".join(asst_parts),
-            "tool_result_text": combined_tool[:TOOL_RESULT_MAX],
+            "tool_result_text": combined_tool,
             "timestamp": last_ts or pending_user["timestamp"],
             "message_index": message_index,
             "completed_offset": completed_offset,
         }
         if provisional:
             turn["provisional"] = True
+        turn = redact_turn(turn)
+        turn["tool_result_text"] = turn["tool_result_text"][:TOOL_RESULT_MAX]
         return turn
 
     with open(path, "r", encoding="utf-8") as f:

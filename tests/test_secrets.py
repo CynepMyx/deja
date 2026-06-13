@@ -47,3 +47,10 @@ def test_redact_private_key():
     text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
     result = redact(text)
     assert "MIIEpAIBAAKCAQEA" not in result
+
+
+def test_truncated_private_key_redacted():
+    text = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A" * 3000  # END cut off
+    result = redact(text)
+    assert "AAAA" not in result
+    assert REDACTED in result
