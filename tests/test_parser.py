@@ -99,3 +99,19 @@ def test_tool_result_truncated_to_2000():
     content = [{"type": "tool_result", "content": long_result}]
     text, tool_text = extract_content(content)
     assert len(tool_text) <= 2000
+
+def test_consecutive_assistant_entries_accumulated():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "do two things"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "first part"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "second part"}]}, "timestamp": "2026-01-01T00:00:02Z", "uuid": "3"},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "next"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "4"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "next answer"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "5"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        assert len(turns) == 2
+        assert "first part" in turns[0]["assistant_text"]
+        assert "second part" in turns[0]["assistant_text"], "Second assistant entry must not be dropped"
+        assert turns[1].get("provisional") is True

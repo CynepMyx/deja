@@ -63,13 +63,34 @@ def parse_jsonl_file(
     path: str, offset: int = 0, start_message_index: int = 0
 ) -> Generator[dict, None, None]:
     pending_user = None
+    asst_parts: list[str] = []
+    asst_tools: list[str] = []
+    last_ts = ""
+    turn_start = offset
     message_index = start_message_index
+
+    def _build(completed_offset: int, provisional: bool = False) -> dict:
+        combined_tool = "\n".join(
+            filter(None, [pending_user["tool_result"], *asst_tools])
+        )
+        turn = {
+            "user_text": pending_user["text"],
+            "assistant_text": "\n\n".join(asst_parts),
+            "tool_result_text": combined_tool[:TOOL_RESULT_MAX],
+            "timestamp": last_ts or pending_user["timestamp"],
+            "message_index": message_index,
+            "completed_offset": completed_offset,
+        }
+        if provisional:
+            turn["provisional"] = True
+        return turn
 
     with open(path, "r", encoding="utf-8") as f:
         if offset > 0:
             f.seek(offset)
 
         while True:
+            line_start = f.tell()
             line = f.readline()
             if not line:
                 break
@@ -84,7 +105,6 @@ def parse_jsonl_file(
                 continue
 
             entry_type = entry.get("type", "")
-
             if entry_type == "summary":
                 continue
 
@@ -93,29 +113,32 @@ def parse_jsonl_file(
             timestamp = entry.get("timestamp", "")
 
             if entry_type == "user":
+                if pending_user is not None and asst_parts:
+                    yield _build(line_start)
+                    message_index += 1
                 text, tool_text = extract_content(content)
                 pending_user = {
                     "text": text,
                     "tool_result": tool_text,
                     "timestamp": timestamp,
                 }
+                asst_parts = []
+                asst_tools = []
+                last_ts = ""
+                turn_start = line_start
 
-            elif entry_type == "assistant" and pending_user is not None:
+            elif entry_type == "assistant":
+                if pending_user is None:
+                    continue
                 text, tool_text = extract_content(content)
-                combined_tool = "\n".join(
-                    filter(None, [pending_user["tool_result"], tool_text])
-                )
-                completed_offset = f.tell()
-                yield {
-                    "user_text": pending_user["text"],
-                    "assistant_text": text,
-                    "tool_result_text": combined_tool[:TOOL_RESULT_MAX],
-                    "timestamp": timestamp or pending_user["timestamp"],
-                    "message_index": message_index,
-                    "completed_offset": completed_offset,
-                }
-                message_index += 1
-                pending_user = None
+                if text:
+                    asst_parts.append(text)
+                if tool_text:
+                    asst_tools.append(tool_text)
+                last_ts = timestamp
+
+        if pending_user is not None and asst_parts:
+            yield _build(turn_start, provisional=True)
 
 def get_file_end_offset(path: str) -> int:
     with open(path, "rb") as f:
