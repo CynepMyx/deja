@@ -2,7 +2,7 @@ import json
 import os
 import time
 import tempfile
-from deja.db import init_db
+from deja.db import init_db, serialize_f32
 from deja.indexer import index_file, get_embedding_model, check_needs_reindex, gc_orphans
 
 def _make_session(tmp, filename, lines):
@@ -290,6 +290,70 @@ def test_codex_live_session_tail_grows_without_duplicates():
         turn0 = " ".join(t for i, t in rows if i == 0)
         assert "part one" in turn0 and "part two" in turn0, "Tail of live turn must be re-indexed"
         assert any("answer two" in t for _, t in rows), "Next turn must be indexed"
-        indices = sorted({i for i, _ in rows})
-        assert indices == [0, 1], f"No duplicate/skipped message_index, got {indices}"
+        pairs = [r for r in conn.execute(
+            "SELECT message_index, split_index FROM chunks ORDER BY message_index, split_index"
+        ).fetchall()]
+        assert pairs == sorted(set(pairs)), f"Duplicate (message_index, split_index) rows: {pairs}"
+        assert {p[0] for p in pairs} == {0, 1}, f"Expected exactly turns 0 and 1, got {pairs}"
+        vec_count = conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+        fts_count = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+        chunks_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        assert chunks_count == vec_count == fts_count, \
+            f"Row drift: chunks={chunks_count} vec={vec_count} fts={fts_count}"
+        conn.close()
+
+
+def test_provisional_turn_shrink_clears_stale_splits():
+    """_delete_chunks_from must remove stale split rows that re-index will not overwrite."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        # long answer -> multiple split chunks for message_index 0
+        path = _make_session(tmp, "rollout-y.jsonl", [
+            {"type": "session_meta", "payload": {"cwd": "/proj"}},
+            _codex_user("long question"),
+            _codex_asst("A" * 4000),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+        splits_before = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0").fetchone()[0]
+        assert splits_before > 1, "fixture must produce multiple splits"
+
+        # Inject a stale split row at split_index=splits_before (beyond what re-index produces).
+        # Without _delete_chunks_from this row survives the re-upsert because _upsert_chunk
+        # only touches rows it actually produces — it never deletes extras.
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        cur = conn.execute(
+            "INSERT INTO chunks (session_id, message_index, split_index, timestamp,"
+            " project_path, chunk_text, tool_result_text, source)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (session_id, 0, splits_before, "2026-06-01T10:00:05Z", "/proj", "STALE", "", "codex"),
+        )
+        cid = cur.lastrowid
+        conn.execute("INSERT INTO chunks_vec (rowid, embedding) VALUES (?,?)",
+                     (cid, serialize_f32([0.0] * 384)))
+        conn.execute("INSERT INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?,?,?)",
+                     (cid, "STALE", ""))
+        conn.commit()
+
+        # grow the file with a new turn so the incremental path fires and turn 0 is re-upserted
+        time.sleep(0.1)
+        _append_lines(path, [
+            _codex_user("next q", ts="2026-06-01T11:00:00Z"),
+            _codex_asst("short", ts="2026-06-01T11:00:05Z"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0 AND split_index = ?",
+            (splits_before,),
+        ).fetchone()[0]
+        assert stale == 0, "stale split row must be cleared by _delete_chunks_from"
+        splits_after = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0").fetchone()[0]
+        assert splits_after == splits_before, "turn 0 splits must be exactly re-created, no stale extras"
+        orphan_vec = conn.execute(
+            "SELECT COUNT(*) FROM chunks_vec WHERE rowid NOT IN (SELECT id FROM chunks)").fetchone()[0]
+        assert orphan_vec == 0, f"{orphan_vec} orphan vector rows after provisional re-upsert"
         conn.close()
