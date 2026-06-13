@@ -41,12 +41,13 @@ PATTERNS = [
     re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]+'),
     # Bare well-known token formats (appear in env dumps / configs without assignment context)
     re.compile(r'\bsk-(?:ant|proj)-[A-Za-z0-9_\-]{16,}'),
-    re.compile(r'\b(?:dop_v1_|figd_|npm_)[A-Za-z0-9_\-]{15,}'),
-    re.compile(r'\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{15,}'),
+    re.compile(r'\b(?:dop_v1_|doo_v1_|dor_v1_|figd_)[A-Za-z0-9_\-]{15,}'),
+    re.compile(r'\bnpm_[A-Za-z0-9]{36}\b'),
+    re.compile(r'\bpypi-AgEIc[A-Za-z0-9_\-]{20,}'),
     re.compile(r'\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'),  # JWT
     re.compile(r'\bAIza[0-9A-Za-z_\-]{35}'),
     re.compile(r'\b[rs]k_live_[A-Za-z0-9]{20,}'),  # Stripe
-    re.compile(r'\b\d{8,10}:AA[A-Za-z0-9_\-]{33}'),  # Telegram bot
+    re.compile(r'\b\d{7,}:AA[A-Za-z0-9_\-]{33,}'),  # Telegram bot
 ]
 
 
