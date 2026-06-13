@@ -355,3 +355,26 @@ def test_provisional_turn_shrink_clears_stale_splits():
             "SELECT COUNT(*) FROM chunks_vec WHERE rowid NOT IN (SELECT id FROM chunks)").fetchone()[0]
         assert orphan_vec == 0, f"{orphan_vec} orphan vector rows after provisional re-upsert"
         conn.close()
+
+
+def test_file_meta_uses_preparse_stat():
+    """Growth during indexing must be picked up by the next run (m2)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        stat_before = os.stat(path)
+        from deja.indexer import _update_file_meta
+        time.sleep(0.05)
+        _append_lines(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q2"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
+        ])
+        _update_file_meta(conn, path, 10, source="claude-code",
+                          next_message_index=1, stat_result=stat_before)
+        conn.commit()
+        row = conn.execute("SELECT last_size FROM indexed_files WHERE path = ?", (path,)).fetchone()
+        assert row[0] == stat_before.st_size, "Meta must record pre-parse size so growth triggers reindex"
+        conn.close()

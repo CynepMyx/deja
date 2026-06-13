@@ -115,6 +115,7 @@ def index_file(
         offset, start_message_index = _get_resume_state(conn, session_id, path)
         _delete_chunks_from(conn, session_id, start_message_index)
 
+    stat_before = os.stat(path)
     parser = get_parser(source)
     turns_gen = parser.parse(path, offset=offset, start_message_index=start_message_index)
     indexed_any = False
@@ -148,12 +149,12 @@ def index_file(
         batch_offset = last.get("completed_offset", None)
         next_idx = last["message_index"] if last.get("provisional") else last["message_index"] + 1
         if batch_offset is not None:
-            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx)
+            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx, stat_result=stat_before)
         conn.commit()
         indexed_any = True
 
     if not indexed_any:
-        _update_file_meta(conn, path, offset, source=source, next_message_index=start_message_index)
+        _update_file_meta(conn, path, offset, source=source, next_message_index=start_message_index, stat_result=stat_before)
         conn.commit()
 
 def _upsert_chunk(conn, chunk: dict, embedding):
@@ -203,8 +204,9 @@ def _upsert_chunk(conn, chunk: dict, embedding):
         )
 
 def _update_file_meta(conn, path: str, completed_offset: int = None,
-                      source: str = "claude-code", next_message_index: int = None):
-    stat = os.stat(path)
+                      source: str = "claude-code", next_message_index: int = None,
+                      stat_result=None):
+    stat = stat_result if stat_result is not None else os.stat(path)
     offset = completed_offset if completed_offset is not None else stat.st_size
     conn.execute(
         """INSERT OR REPLACE INTO indexed_files
