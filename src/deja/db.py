@@ -4,7 +4,7 @@ import sys
 
 import sqlite_vec
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
 
