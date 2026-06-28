@@ -96,6 +96,39 @@ def test_parse_jsonl_with_offset():
 
 def test_tool_result_truncated_to_2000():
     long_result = "x" * 5000
-    content = [{"type": "tool_result", "content": long_result}]
-    text, tool_text = extract_content(content)
-    assert len(tool_text) <= 2000
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": long_result}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        assert len(turns[0]["tool_result_text"]) <= 2000
+
+def test_secret_redacted_before_tool_result_truncation():
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + "B" * 2400 + "\n-----END RSA PRIVATE KEY-----"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": key}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        assert "BBBB" not in turns[0]["tool_result_text"], "Key must be redacted before truncation"
+
+
+def test_consecutive_assistant_entries_accumulated():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "do two things"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "first part"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "second part"}]}, "timestamp": "2026-01-01T00:00:02Z", "uuid": "3"},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "next"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "4"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "next answer"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "5"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        assert len(turns) == 2
+        assert "first part" in turns[0]["assistant_text"]
+        assert "second part" in turns[0]["assistant_text"], "Second assistant entry must not be dropped"
+        assert turns[1].get("provisional") is True

@@ -110,22 +110,39 @@ def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> l
     return results
 
 
+def _annotate_source(conn, results: list[dict]) -> list[dict]:
+    if not results:
+        return results
+    ids = [r["id"] for r in results]
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, source FROM chunks WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    source_by_id = {row[0]: row[1] for row in rows}
+    for r in results:
+        r["source"] = source_by_id.get(r["id"], "claude-code")
+    return results
+
+
 def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
-    time_decay: bool = False,
+    source: str = None, time_decay: bool = False,
 ) -> list[dict]:
-    has_filters = project or date_from or date_to
+    has_filters = project or date_from or date_to or source
     k = 100 if has_filters else 20
     vec_results = _vector_search(conn, model, query, k=k)
     fts_results = _fts_search(conn, query, k=k)
     merged = _rrf_merge(vec_results, fts_results)
+    merged = _annotate_source(conn, merged)
 
     if time_decay:
         merged = _apply_time_decay(merged)
 
     if project:
         merged = [r for r in merged if r.get("project_path") == project]
+    if source:
+        merged = [r for r in merged if r.get("source") == source]
     if date_from:
         merged = [r for r in merged if r.get("timestamp", "") >= date_from]
     if date_to:

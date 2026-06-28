@@ -4,9 +4,8 @@ from itertools import islice
 from fastembed import TextEmbedding
 from fastembed.text.text_embedding import PoolingType, ModelSource
 from deja.db import serialize_f32
-from deja.parser import parse_jsonl_file
+from deja.parsers.registry import get_parser
 from deja.chunker import make_chunks
-from deja.secrets import redact
 
 EMBED_BATCH_SIZE = 32
 TURNS_PER_BATCH = 50
@@ -55,18 +54,34 @@ def _delete_file_chunks(conn, session_id: str):
         conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
     conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
 
+def _delete_chunks_from(conn, session_id: str, from_index: int):
+    ids = conn.execute(
+        "SELECT id FROM chunks WHERE session_id = ? AND message_index >= ?",
+        (session_id, from_index),
+    ).fetchall()
+    for (cid,) in ids:
+        conn.execute("DELETE FROM chunks_vec WHERE rowid = ?", (cid,))
+        conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
+    conn.execute(
+        "DELETE FROM chunks WHERE session_id = ? AND message_index >= ?",
+        (session_id, from_index),
+    )
+
 def _get_resume_state(conn, session_id: str, path: str) -> tuple[int, int]:
     row = conn.execute(
-        "SELECT last_offset FROM indexed_files WHERE path = ?", (path,)
+        "SELECT last_offset, next_message_index FROM indexed_files WHERE path = ?",
+        (path,),
     ).fetchone()
-    offset = row[0] if row else 0
-
-    row = conn.execute(
-        "SELECT MAX(message_index) FROM chunks WHERE session_id = ?",
-        (session_id,),
+    if row is None:
+        return 0, 0
+    offset = row[0]
+    if row[1] is not None:
+        return offset, row[1]
+    # legacy rows without next_message_index: derive from chunks
+    row2 = conn.execute(
+        "SELECT MAX(message_index) FROM chunks WHERE session_id = ?", (session_id,)
     ).fetchone()
-    start_idx = (row[0] + 1) if row and row[0] is not None else 0
-
+    start_idx = (row2[0] + 1) if row2 and row2[0] is not None else 0
     return offset, start_idx
 
 def _iter_batches(iterator, size):
@@ -77,7 +92,13 @@ def _iter_batches(iterator, size):
             break
         yield batch
 
-def index_file(conn, model: TextEmbedding, path: str, project_path: str):
+def index_file(
+    conn,
+    model: TextEmbedding,
+    path: str,
+    project_path: str,
+    source: str = "claude-code",
+):
     session_id = os.path.splitext(os.path.basename(path))[0]
     needs = check_needs_reindex(conn, path)
 
@@ -91,14 +112,17 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
         _delete_file_chunks(conn, session_id)
     elif needs == "incremental":
         offset, start_message_index = _get_resume_state(conn, session_id, path)
+        _delete_chunks_from(conn, session_id, start_message_index)
 
-    turns_gen = parse_jsonl_file(path, offset=offset, start_message_index=start_message_index)
+    stat_before = os.stat(path)
+    parser = get_parser(source)
+    turns_gen = parser.parse(path, offset=offset, start_message_index=start_message_index)
     indexed_any = False
 
     for batch_turns in _iter_batches(turns_gen, TURNS_PER_BATCH):
         chunks = []
         for turn in batch_turns:
-            chunks.extend(make_chunks(turn, session_id, project_path))
+            chunks.extend(make_chunks(turn, session_id, project_path, source=source))
 
         if not chunks:
             continue
@@ -111,23 +135,22 @@ def index_file(conn, model: TextEmbedding, path: str, project_path: str):
             all_embeddings.extend(model.embed(emb_batch))
 
         for chunk, embedding in zip(chunks, all_embeddings):
-            chunk["chunk_text"] = redact(chunk["chunk_text"])
-            if chunk.get("tool_result_text"):
-                chunk["tool_result_text"] = redact(chunk["tool_result_text"])
             try:
                 _upsert_chunk(conn, chunk, embedding)
             except Exception as e:
                 print(f"[deja] error inserting chunk: {e}", file=sys.stderr)
 
         # Commit after each batch — crash-safe resume from last committed offset
-        batch_offset = batch_turns[-1].get("completed_offset", None)
-        if batch_offset:
-            _update_file_meta(conn, path, batch_offset)
+        last = batch_turns[-1]
+        batch_offset = last.get("completed_offset", None)
+        next_idx = last["message_index"] if last.get("provisional") else last["message_index"] + 1
+        if batch_offset is not None:
+            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx, stat_result=stat_before)
         conn.commit()
         indexed_any = True
 
     if not indexed_any:
-        _update_file_meta(conn, path, offset)
+        _update_file_meta(conn, path, offset, source=source, next_message_index=start_message_index, stat_result=stat_before)
         conn.commit()
 
 def _upsert_chunk(conn, chunk: dict, embedding):
@@ -138,14 +161,16 @@ def _upsert_chunk(conn, chunk: dict, embedding):
         (chunk["session_id"], chunk["message_index"], chunk["split_index"]),
     ).fetchone()
 
+    source = chunk.get("source", "claude-code")
     if row:
         chunk_id = row[0]
         conn.execute(
             """UPDATE chunks SET timestamp = ?, project_path = ?,
-               chunk_text = ?, tool_result_text = ?
+               chunk_text = ?, tool_result_text = ?, source = ?
                WHERE id = ?""",
             (chunk["timestamp"], chunk["project_path"],
-             chunk["chunk_text"], chunk.get("tool_result_text", ""), chunk_id),
+             chunk["chunk_text"], chunk.get("tool_result_text", ""),
+             source, chunk_id),
         )
         conn.execute(
             "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
@@ -158,11 +183,11 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     else:
         cursor = conn.execute(
             """INSERT INTO chunks
-            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (chunk["session_id"], chunk["message_index"], chunk["split_index"],
              chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
-             chunk.get("tool_result_text", "")),
+             chunk.get("tool_result_text", ""), source),
         )
         chunk_id = cursor.lastrowid
         conn.execute(
@@ -174,17 +199,32 @@ def _upsert_chunk(conn, chunk: dict, embedding):
             (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
         )
 
-def _update_file_meta(conn, path: str, completed_offset: int = None):
-    stat = os.stat(path)
-    offset = completed_offset if completed_offset else stat.st_size
+def _update_file_meta(conn, path: str, completed_offset: int = None,
+                      source: str = "claude-code", next_message_index: int = None,
+                      stat_result=None):
+    stat = stat_result if stat_result is not None else os.stat(path)
+    offset = completed_offset if completed_offset is not None else stat.st_size
     conn.execute(
-        """INSERT OR REPLACE INTO indexed_files (path, last_offset, last_mtime, last_size)
-        VALUES (?, ?, ?, ?)""",
-        (path, offset, stat.st_mtime, stat.st_size),
+        """INSERT OR REPLACE INTO indexed_files
+           (path, last_offset, last_mtime, last_size, source, next_message_index)
+        VALUES (?, ?, ?, ?, ?, ?)""",
+        (path, offset, stat.st_mtime, stat.st_size, source, next_message_index),
     )
 
-def gc_orphans(conn, known_paths: set[str]):
-    indexed = conn.execute("SELECT path FROM indexed_files").fetchall()
+def gc_orphans(conn, known_paths: set[str], sources: list[str] = None):
+    """Remove index entries for files that no longer exist on disk.
+
+    `sources` limits gc to files indexed from those sources — a partial run
+    (`deja index --source codex`) must not treat other sources' files as orphans.
+    """
+    if sources is None:
+        indexed = conn.execute("SELECT path FROM indexed_files").fetchall()
+    else:
+        placeholders = ",".join("?" * len(sources))
+        indexed = conn.execute(
+            f"SELECT path FROM indexed_files WHERE source IN ({placeholders})",
+            sources,
+        ).fetchall()
     for (path,) in indexed:
         if path not in known_paths:
             session_id = os.path.splitext(os.path.basename(path))[0]

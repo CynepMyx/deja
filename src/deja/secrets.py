@@ -37,6 +37,17 @@ PATTERNS = [
     re.compile(r'://[^:/@\s]+:([^@\s]{6,})@'),
     # login / password pairs (slash separated)
     re.compile(r'(?i)(?:логин|login)\s*/\s*\S+\s*/\s*(\S{6,})'),
+    # Truncation fallback: BEGIN header without END still gets redacted
+    re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]+'),
+    # Bare well-known token formats (appear in env dumps / configs without assignment context)
+    re.compile(r'\bsk-(?:ant|proj)-[A-Za-z0-9_\-]{16,}'),
+    re.compile(r'\b(?:dop_v1_|doo_v1_|dor_v1_|figd_)[A-Za-z0-9_\-]{15,}'),
+    re.compile(r'\bnpm_[A-Za-z0-9]{36}\b'),
+    re.compile(r'\bpypi-AgEIc[A-Za-z0-9_\-]{20,}'),
+    re.compile(r'\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'),  # JWT
+    re.compile(r'\bAIza[0-9A-Za-z_\-]{35}'),
+    re.compile(r'\b[rs]k_live_[A-Za-z0-9]{20,}'),  # Stripe
+    re.compile(r'\b\d{7,}:AA[A-Za-z0-9_\-]{33,}'),  # Telegram bot
 ]
 
 
@@ -46,3 +57,11 @@ def redact(text: str) -> str:
     for pattern in PATTERNS:
         text = pattern.sub(REDACTED, text)
     return text
+
+
+def redact_turn(turn: dict) -> dict:
+    turn["user_text"] = redact(turn["user_text"])
+    turn["assistant_text"] = redact(turn["assistant_text"])
+    if turn.get("tool_result_text"):
+        turn["tool_result_text"] = redact(turn["tool_result_text"])
+    return turn

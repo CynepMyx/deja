@@ -2,8 +2,8 @@ import json
 import os
 import time
 import tempfile
-from deja.db import init_db
-from deja.indexer import index_file, get_embedding_model, check_needs_reindex
+from deja.db import init_db, serialize_f32
+from deja.indexer import index_file, get_embedding_model, check_needs_reindex, gc_orphans
 
 def _make_session(tmp, filename, lines):
     path = os.path.join(tmp, filename)
@@ -69,51 +69,49 @@ def test_safe_reindex_on_truncation():
         conn.close()
 
 def test_incremental_append_no_collision():
-    """New turns appended to file get correct message_index, not colliding with old ones."""
+    """New turns appended to file get correct message_index; completed turns keep stable ids.
+
+    Note: the LAST turn of a file is provisional (re-upserted fuller on next run),
+    so only chunks below next_message_index are guaranteed id-stable.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.db")
         conn = init_db(db_path)
         model = get_embedding_model()
 
-        # Index first turn
+        # Run 1: turn 0 completes (user2 follows it), turn 1 is the provisional tail
         path = _make_session(tmp, "sess.jsonl", [
             {"type": "user", "message": {"content": [{"type": "text", "text": "first question"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "first answer"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
-        ])
-        index_file(conn, model, path, "proj")
-        count1 = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        assert count1 >= 1
-
-        old_ids = {r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()}
-        old_texts = {r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()}
-        assert any("first" in t for t in old_texts)
-
-        # Append second turn
-        time.sleep(0.1)  # ensure mtime changes
-        _append_lines(path, [
             {"type": "user", "message": {"content": [{"type": "text", "text": "second question"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "second answer"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "4"},
         ])
-
         index_file(conn, model, path, "proj")
-        count2 = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        assert count2 >= 2, f"Expected at least 2 chunks, got {count2}"
+        turn0_ids = {r[0] for r in conn.execute(
+            "SELECT id FROM chunks WHERE message_index = 0").fetchall()}
+        assert turn0_ids, "turn 0 must be indexed"
 
-        # Old chunks must still exist with same IDs
-        new_ids = {r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()}
-        assert old_ids.issubset(new_ids), "Old chunk IDs should be preserved"
+        # Run 2: append turn 2; turn 1 (was provisional) is re-upserted, turn 0 untouched
+        time.sleep(0.1)
+        _append_lines(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "third question"}]}, "timestamp": "2026-01-01T00:02:00Z", "uuid": "5"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "third answer"}]}, "timestamp": "2026-01-01T00:02:01Z", "uuid": "6"},
+        ])
+        index_file(conn, model, path, "proj")
 
-        # Both turns must be present
-        all_texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
-        assert any("first" in t for t in all_texts), "First turn should still exist"
-        assert any("second" in t for t in all_texts), "Second turn should be added"
+        turn0_ids_after = {r[0] for r in conn.execute(
+            "SELECT id FROM chunks WHERE message_index = 0").fetchall()}
+        assert turn0_ids_after == turn0_ids, "Completed turns below next_message_index must keep stable ids"
 
-        # message_index should be distinct
+        all_texts = [r[0] for r in conn.execute(
+            "SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
+        assert any("first" in t for t in all_texts)
+        assert any("second" in t for t in all_texts)
+        assert any("third" in t for t in all_texts)
+
         indices = [r[0] for r in conn.execute(
-            "SELECT DISTINCT message_index FROM chunks ORDER BY message_index"
-        ).fetchall()]
-        assert len(indices) >= 2, f"Expected distinct message indices, got {indices}"
-        assert indices[0] != indices[1], "Message indices must not collide"
+            "SELECT DISTINCT message_index FROM chunks ORDER BY message_index").fetchall()]
+        assert indices == [0, 1, 2], f"Expected message indices [0, 1, 2], got {indices}"
 
         conn.close()
 
@@ -183,4 +181,274 @@ def test_row_consistency_chunks_vec_fts():
         ).fetchone()[0]
         assert orphan_vec == 0, f"Found {orphan_vec} orphan vec rows"
 
+        conn.close()
+
+def test_gc_orphans_scoped_to_sources():
+    """Partial run (--source codex) must not treat other sources' files as orphans."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "cc-sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hello"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "world"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj", source="claude-code")
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1
+
+        # gc scoped to codex: claude-code file is NOT in known_paths but must survive
+        gc_orphans(conn, set(), sources=["codex"])
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 1
+
+        # gc scoped to claude-code: now it is a real orphan and gets removed
+        gc_orphans(conn, set(), sources=["claude-code"])
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 0
+
+        conn.close()
+
+def test_gc_orphans_unscoped_removes_all():
+    """sources=None keeps the old global behaviour (full `deja index` run)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "cc-sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hello"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "world"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj", source="claude-code")
+
+        gc_orphans(conn, set())
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0] == 0
+        conn.close()
+
+def test_file_with_only_dangling_user_indexed_later():
+    """File containing only a user message must not be marked fully indexed (C1)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "lonely question"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+        ])
+        index_file(conn, model, path, "proj")
+        # offset must be 0, not file size
+        row = conn.execute("SELECT last_offset FROM indexed_files WHERE path = ?", (path,)).fetchone()
+        assert row[0] == 0, f"Expected offset 0 for unindexed dangling user, got {row[0]}"
+
+        time.sleep(0.1)
+        _append_lines(path, [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "late answer"}]}, "timestamp": "2026-01-01T00:00:05Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()]
+        assert any("lonely" in t for t in texts), "Dangling-only turn must be indexed after assistant arrives"
+        conn.close()
+
+
+def _codex_user(text, ts="2026-06-01T10:00:00Z"):
+    return {"type": "response_item", "timestamp": ts,
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": text}]}}
+
+def _codex_asst(text, ts="2026-06-01T10:00:05Z"):
+    return {"type": "response_item", "timestamp": ts,
+            "payload": {"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}]}}
+
+def test_codex_live_session_tail_grows_without_duplicates():
+    """Provisional last turn is re-upserted fuller on next run (B3)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "rollout-x.jsonl", [
+            {"type": "session_meta", "payload": {"cwd": "/proj"}},
+            _codex_user("question one"),
+            _codex_asst("answer part one"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks ORDER BY message_index").fetchall()]
+        assert any("part one" in t for t in texts)
+
+        time.sleep(0.1)
+        _append_lines(path, [
+            _codex_asst("answer part two"),
+            _codex_user("question two", ts="2026-06-01T11:00:00Z"),
+            _codex_asst("answer two", ts="2026-06-01T11:00:05Z"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+
+        rows = conn.execute(
+            "SELECT message_index, chunk_text FROM chunks ORDER BY message_index, split_index"
+        ).fetchall()
+        turn0 = " ".join(t for i, t in rows if i == 0)
+        assert "part one" in turn0 and "part two" in turn0, "Tail of live turn must be re-indexed"
+        assert any("answer two" in t for _, t in rows), "Next turn must be indexed"
+        pairs = [r for r in conn.execute(
+            "SELECT message_index, split_index FROM chunks ORDER BY message_index, split_index"
+        ).fetchall()]
+        assert pairs == sorted(set(pairs)), f"Duplicate (message_index, split_index) rows: {pairs}"
+        assert {p[0] for p in pairs} == {0, 1}, f"Expected exactly turns 0 and 1, got {pairs}"
+        vec_count = conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+        fts_count = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+        chunks_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        assert chunks_count == vec_count == fts_count, \
+            f"Row drift: chunks={chunks_count} vec={vec_count} fts={fts_count}"
+        conn.close()
+
+
+def test_provisional_turn_shrink_clears_stale_splits():
+    """_delete_chunks_from must remove stale split rows that re-index will not overwrite."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        # long answer -> multiple split chunks for message_index 0
+        path = _make_session(tmp, "rollout-y.jsonl", [
+            {"type": "session_meta", "payload": {"cwd": "/proj"}},
+            _codex_user("long question"),
+            _codex_asst("A" * 4000),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+        splits_before = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0").fetchone()[0]
+        assert splits_before > 1, "fixture must produce multiple splits"
+
+        # Inject a stale split row at split_index=splits_before (beyond what re-index produces).
+        # Without _delete_chunks_from this row survives the re-upsert because _upsert_chunk
+        # only touches rows it actually produces — it never deletes extras.
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        cur = conn.execute(
+            "INSERT INTO chunks (session_id, message_index, split_index, timestamp,"
+            " project_path, chunk_text, tool_result_text, source)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (session_id, 0, splits_before, "2026-06-01T10:00:05Z", "/proj", "STALE", "", "codex"),
+        )
+        cid = cur.lastrowid
+        conn.execute("INSERT INTO chunks_vec (rowid, embedding) VALUES (?,?)",
+                     (cid, serialize_f32([0.0] * 384)))
+        conn.execute("INSERT INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?,?,?)",
+                     (cid, "STALE", ""))
+        conn.commit()
+
+        # grow the file with a new turn so the incremental path fires and turn 0 is re-upserted
+        time.sleep(0.1)
+        _append_lines(path, [
+            _codex_user("next q", ts="2026-06-01T11:00:00Z"),
+            _codex_asst("short", ts="2026-06-01T11:00:05Z"),
+        ])
+        index_file(conn, model, path, "/proj", source="codex")
+
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0 AND split_index = ?",
+            (splits_before,),
+        ).fetchone()[0]
+        assert stale == 0, "stale split row must be cleared by _delete_chunks_from"
+        splits_after = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE message_index = 0").fetchone()[0]
+        assert splits_after == splits_before, "turn 0 splits must be exactly re-created, no stale extras"
+        orphan_vec = conn.execute(
+            "SELECT COUNT(*) FROM chunks_vec WHERE rowid NOT IN (SELECT id FROM chunks)").fetchone()[0]
+        assert orphan_vec == 0, f"{orphan_vec} orphan vector rows after provisional re-upsert"
+        conn.close()
+
+
+def test_growth_during_parse_detected_next_run(monkeypatch):
+    """File growth DURING parsing must leave meta stale so the next run reindexes (m2)."""
+    from deja.parsers import claude_code
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+
+        real_parse = claude_code.parse_jsonl_file
+
+        def growing_parse(p, offset=0, start_message_index=0):
+            yield from real_parse(p, offset=offset, start_message_index=start_message_index)
+            # file grows AFTER the parser finished reading but BEFORE meta is written
+            _append_lines(p, [
+                {"type": "user", "message": {"content": [{"type": "text", "text": "q2 grown"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "a2 grown"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "4"},
+            ])
+
+        monkeypatch.setattr(claude_code, "parse_jsonl_file", growing_parse)
+        monkeypatch.setattr(claude_code, "parse", growing_parse)
+        index_file(conn, model, path, "proj")
+        monkeypatch.undo()
+
+        # with the pre-parse stat recorded, the next run MUST see the growth
+        from deja.indexer import check_needs_reindex
+        needs = check_needs_reindex(conn, path)
+        assert needs != False, "Growth during parse must trigger reindex on next run"
+
+        index_file(conn, model, path, "proj")
+        texts = [r[0] for r in conn.execute("SELECT chunk_text FROM chunks").fetchall()]
+        assert any("grown" in t for t in texts), "Turn appended during parse must be indexed by next run"
+        conn.close()
+
+
+def test_file_meta_uses_preparse_stat():
+    """Growth during indexing must be picked up by the next run (m2)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        stat_before = os.stat(path)
+        from deja.indexer import _update_file_meta
+        time.sleep(0.05)
+        _append_lines(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q2"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "3"},
+        ])
+        _update_file_meta(conn, path, 10, source="claude-code",
+                          next_message_index=1, stat_result=stat_before)
+        conn.commit()
+        row = conn.execute("SELECT last_size FROM indexed_files WHERE path = ?", (path,)).fetchone()
+        assert row[0] == stat_before.st_size, "Meta must record pre-parse size so growth triggers reindex"
+        conn.close()
+
+
+def test_secret_at_chunk_boundary_not_leaked():
+    secret = "password=SuperBoundarySecret99"
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        long_text = "x" * 1495 + " " + secret + " " + "y" * 1500
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "long"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
+            assert "SuperBoundarySecret" not in text
+        conn.close()
+
+
+def test_long_private_key_split_across_chunks_not_leaked():
+    """Key body >> OVERLAP: only chunk 0 carries the BEGIN anchor; per-chunk
+    redaction would leak the body in later chunks. Guards redact-before-split."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        long_text = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "M" * 2000
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "show key"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "proj")
+        for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
+            assert "MMMM" not in text, "Key body must not survive in any chunk"
         conn.close()
