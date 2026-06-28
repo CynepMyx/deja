@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 (2026-06-29)
+
+### Features
+- **Multi-source support (#8)** — index sessions from both Claude Code and OpenAI Codex CLI in one unified database. `~/.codex/sessions/YYYY/MM/DD/*.jsonl` is walked directly (session_index.jsonl is ignored — it drifts)
+- **Parser registry** — adding Cursor / Gemini / OpenCode parsers no longer touches CLI or indexer; each parser module declares `SOURCE`, `discover()`, `parse()`
+- **`--source` filter** — on `deja index`, `deja search` and the MCP `search` tool (values: `all`, `claude-code`, `codex`)
+- **Source in search results** — every result carries a `source` field
+
+### Bug fixes
+- **`gc_orphans` scoped to indexed sources** — `deja index --source codex` no longer treats every claude-code file as orphan and wipes its chunks
+- **Provisional EOF turn** — last turn of a growing JSONL is now re-indexed on the next run instead of frozen at past-EOF offset
+- **Pre-parse stat in file meta** — data appended during indexing is no longer stamped as already indexed
+- **Dangling user at offset=0** — `offset=0` is no longer treated as falsy, so the first turn of a partially-indexed session isn't skipped forever
+- **Consecutive assistant entries** — Claude Code splits one model turn into several assistant JSONL entries; the old pairing kept only the first and dropped the rest. Backports the codex accumulate-until-next-user strategy
+
+### Secrets redaction
+- **Redact at turn level, before truncate and chunk** — private keys split across the 2000-char tool-result boundary or a chunk split are now caught; embeddings are computed over redacted text
+- **Bare high-entropy tokens** — sk-ant/sk-proj, DigitalOcean, Figma, npm, PyPI, standalone JWTs, Google API keys, Stripe live keys and Telegram bot tokens are now caught without assignment context (the common case in tool results)
+- **Pattern fixes** — Telegram bot IDs of any digit length, TestPyPI tokens, DO OAuth/refresh siblings; `npm_package_*` / `npm_config_*` env vars no longer false-positive
+
+### Schema (requires reindex)
+- **SCHEMA_VERSION 1 → 3.** First run of 0.4.0 detects the mismatch and triggers a full reindex automatically with a clear log line
+- New columns: `chunks.source`, `indexed_files.source`, `indexed_files.next_message_index`
+- New index: `idx_chunks_source`
+- `_migrate_if_needed` in `init_db` — drops old index tables on version mismatch instead of crashing on `CREATE INDEX`
+
+### Tests
+- 82 total (was 41 at 0.3.0)
+
 ## 0.3.0 (2026-04-02)
 
 ### Features
