@@ -192,6 +192,25 @@ def cmd_search(args):
 
     conn.close()
 
+def cmd_analytics(args):
+    import sqlite3
+    from deja import analytics
+
+    index_path = get_index_path()
+    if not os.path.exists(index_path):
+        print("[deja] index not found. Run 'deja index' first.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+    report = analytics.collect_all(conn, top=args.top, since_days=args.since_days)
+    conn.close()
+
+    if args.format == "json":
+        print(analytics.format_json(report))
+    else:
+        print(analytics.format_human(report))
+
+
 def cmd_redact():
     import sqlite3
     import sqlite_vec
@@ -258,6 +277,11 @@ def main():
 
     sub.add_parser("redact", help="Redact secrets in existing index (no re-embedding)")
 
+    an = sub.add_parser("analytics", help="Usage analytics from indexed sessions")
+    an.add_argument("--top", type=int, default=10, help="Top N in each ranking (default: 10)")
+    an.add_argument("--since-days", type=int, default=30, help="By-day window (default: 30)")
+    an.add_argument("--format", choices=["human", "json"], default="human")
+
     ev = sub.add_parser("eval", help="Evaluate search quality with golden pairs")
     ev.add_argument("--golden", default=None, help="Path to golden_pairs.json")
     ev.add_argument("--limit", type=int, default=5, help="Results per query (default: 5)")
@@ -273,6 +297,8 @@ def main():
         cmd_search(args)
     elif args.command == "redact":
         cmd_redact()
+    elif args.command == "analytics":
+        cmd_analytics(args)
     elif args.command == "eval":
         from deja.eval import evaluate
         evaluate(golden_path=args.golden, limit=args.limit)
