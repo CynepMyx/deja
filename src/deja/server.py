@@ -56,9 +56,12 @@ async def lifespan(server):
 mcp = FastMCP("deja", lifespan=lifespan)
 
 
-def _do_search(conn, model, query, limit=10, project=None, source=None, date_from=None, date_to=None):
+def _do_search(conn, model, query, limit=10, project=None, source=None,
+               git_branch=None, git_branch_prefix=None,
+               date_from=None, date_to=None):
     return hybrid_search(conn, model, query, limit=limit,
                          project=project, source=source,
+                         git_branch=git_branch, git_branch_prefix=git_branch_prefix,
                          date_from=date_from, date_to=date_to)
 
 
@@ -110,6 +113,8 @@ async def search(
     limit: int = 10,
     project: str = None,
     source: str = None,
+    git_branch: str = None,
+    git_branch_prefix: str = None,
     date_from: str = None,
     date_to: str = None,
     ctx: Context = None,
@@ -117,6 +122,8 @@ async def search(
     """Search past AI agent sessions by meaning. Returns relevant conversation chunks with context.
 
     source: optional filter, e.g. 'claude-code' or 'codex'.
+    git_branch: filter by exact git branch captured at message time (Claude Code only for now).
+    git_branch_prefix: filter by branch prefix, e.g. 'feature/' matches feature/*.
     """
     lc = ctx.lifespan_context
     lazy_model = lc.get("model")
@@ -124,7 +131,10 @@ async def search(
     if lazy_model is None or db is None:
         raise ToolError("Index not loaded. Run 'deja index' first.")
     model = await asyncio.to_thread(lazy_model.get)
-    return await asyncio.to_thread(_do_search, db, model, query, limit, project, source, date_from, date_to)
+    return await asyncio.to_thread(
+        _do_search, db, model, query, limit, project, source,
+        git_branch, git_branch_prefix, date_from, date_to,
+    )
 
 
 @mcp.tool()

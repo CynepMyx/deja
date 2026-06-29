@@ -176,6 +176,7 @@ def cmd_search(args):
     results = hybrid_search(
         conn, model, args.query, limit=args.limit,
         project=args.project, source=args.source,
+        git_branch=args.git_branch, git_branch_prefix=args.git_branch_prefix,
     )
 
     if not results:
@@ -274,6 +275,8 @@ def main():
         choices=all_sources(),
         help="Filter by source (claude-code, codex, ...)",
     )
+    sr.add_argument("--git-branch", default=None, help="Filter by exact git branch")
+    sr.add_argument("--git-branch-prefix", default=None, help="Filter by branch prefix, e.g. feature/")
 
     sub.add_parser("redact", help="Redact secrets in existing index (no re-embedding)")
 
