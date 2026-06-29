@@ -24,12 +24,14 @@ def discover() -> Iterator[tuple[str, str]]:
         for jsonl in glob.glob(os.path.join(full_project, "*.jsonl")):
             yield jsonl, project_dir
 
-def extract_content(content) -> tuple[str, str]:
+def extract_content(content) -> tuple[str, str, list[str]]:
+    """Returns (text, tool_result, tool_names_used)."""
     if isinstance(content, str):
-        return content, ""
+        return content, "", []
 
     text_parts = []
     tool_result_parts = []
+    tool_names: list[str] = []
 
     for block in content:
         block_type = block.get("type", "")
@@ -39,6 +41,7 @@ def extract_content(content) -> tuple[str, str]:
 
         elif block_type == "tool_use":
             name = block.get("name", "unknown")
+            tool_names.append(name)
             inp = block.get("input", {})
             if isinstance(inp, dict):
                 cmd = inp.get("command", inp.get("file_path", inp.get("query", "")))
@@ -58,7 +61,24 @@ def extract_content(content) -> tuple[str, str]:
         elif block_type == "thinking":
             continue
 
-    return "\n".join(text_parts), "\n".join(tool_result_parts)
+    return "\n".join(text_parts), "\n".join(tool_result_parts), tool_names
+
+
+def _extract_usage(message: dict) -> dict:
+    """Extract token counts from message.usage, normalized to a fixed key set."""
+    usage = message.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens", 0) or 0),
+        "output_tokens": int(usage.get("output_tokens", 0) or 0),
+        "cache_creation_tokens": int(usage.get("cache_creation_input_tokens", 0) or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
+    }
+
+
+def _accumulate_usage(acc: dict, new: dict) -> dict:
+    for k in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"):
+        acc[k] = acc.get(k, 0) + new.get(k, 0)
+    return acc
 
 def parse_jsonl_file(
     path: str, offset: int = 0, start_message_index: int = 0
@@ -66,6 +86,9 @@ def parse_jsonl_file(
     pending_user = None
     asst_parts: list[str] = []
     asst_tools: list[str] = []
+    asst_tool_names: list[str] = []
+    asst_usage: dict = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
+    git_branch: str | None = None
     last_ts = ""
     turn_start = offset
     message_index = start_message_index
@@ -81,6 +104,9 @@ def parse_jsonl_file(
             "timestamp": last_ts or pending_user["timestamp"],
             "message_index": message_index,
             "completed_offset": completed_offset,
+            "git_branch": git_branch,
+            "usage": dict(asst_usage),
+            "tool_names": list(asst_tool_names),
         }
         if provisional:
             turn["provisional"] = True
@@ -114,12 +140,13 @@ def parse_jsonl_file(
             message = entry.get("message", {})
             content = message.get("content", [])
             timestamp = entry.get("timestamp", "")
+            record_branch = entry.get("gitBranch")
 
             if entry_type == "user":
                 if pending_user is not None and asst_parts:
                     yield _build(line_start)
                     message_index += 1
-                text, tool_text = extract_content(content)
+                text, tool_text, _ = extract_content(content)
                 pending_user = {
                     "text": text,
                     "tool_result": tool_text,
@@ -127,17 +154,25 @@ def parse_jsonl_file(
                 }
                 asst_parts = []
                 asst_tools = []
+                asst_tool_names = []
+                asst_usage = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
+                git_branch = record_branch
                 last_ts = ""
                 turn_start = line_start
 
             elif entry_type == "assistant":
                 if pending_user is None:
                     continue
-                text, tool_text = extract_content(content)
+                text, tool_text, tool_names = extract_content(content)
                 if text:
                     asst_parts.append(text)
                 if tool_text:
                     asst_tools.append(tool_text)
+                if tool_names:
+                    asst_tool_names.extend(tool_names)
+                _accumulate_usage(asst_usage, _extract_usage(message))
+                if record_branch:
+                    git_branch = record_branch
                 last_ts = timestamp
 
         if pending_user is not None and asst_parts:
