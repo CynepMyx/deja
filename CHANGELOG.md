@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 (2026-06-29)
+
+### Features
+
+- **`deja analytics` command (#25)** — read-only usage reports from a new pre-aggregated `sessions` table. Five reports: top by token cost, top by length, by-project, by-tool, by-day sparkline. `--top N`, `--since-days N`, `--format human|json`.
+- **Git-state filtering (#24)** — `chunks.git_branch` captured at message time from JSONL records. `deja search --git-branch X` exact match or `--git-branch-prefix feature/`. Same params on MCP `search` tool. Claude Code populates branch from per-record `gitBranch`; Codex from `session_meta.payload.git.branch`; other sources NULL (filter naturally excludes). Note: Claude Code writes the literal string `"HEAD"` instead of the branch name when `cwd` isn't a git checkout or the repo is detached — filtering by `"HEAD"` retrieves those.
+- **Parser contract widened** — both `claude-code` and `codex` parsers now emit `usage`, `git_branch`, and `tool_names` per turn. Tokens aggregated across the consecutive assistant entries that make up one turn.
+- **Indexer pre-aggregate write path** — every non-provisional turn UPSERTs the `sessions` row (sum tokens, MIN/MAX timestamps, +1 turn_count) and increments per-tool counts in `tool_calls`. `_delete_file_chunks` clears both tables for the session so a full reindex starts from zero.
+
+### Schema (requires reindex)
+
+- **SCHEMA_VERSION 3 → 4.** First run of 0.5.0 detects mismatch and triggers full reindex with a clear log line.
+- New tables: `sessions`, `tool_calls`.
+- New columns on `chunks`: `git_branch`, `parent_id` (parent_id is currently always NULL — reserved for #13 parent-child chunking in 0.6.0).
+- New indexes: `idx_chunks_branch`, `idx_chunks_parent`, `idx_sessions_project`, `idx_sessions_started`.
+
+### Tests
+
+- 92 total (was 82 at 0.4.0) — 10 new for analytics queries and formatting.
+
 ## 0.4.0 (2026-06-29)
 
 ### Features

@@ -53,6 +53,53 @@ def _delete_file_chunks(conn, session_id: str):
         conn.execute("DELETE FROM chunks_vec WHERE rowid = ?", (cid,))
         conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (cid,))
     conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
+    # analytics pre-aggregates reset on full reindex (incremental tolerates drift)
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (session_id,))
+
+
+def _upsert_session(conn, session_id: str, source: str, project_path: str, turn: dict):
+    usage = turn.get("usage") or {}
+    ts = turn.get("timestamp", "")
+    conn.execute(
+        """INSERT INTO sessions (
+              session_id, source, project_path, started_at, ended_at, turn_count,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
+           )
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+              project_path = COALESCE(sessions.project_path, excluded.project_path),
+              started_at = CASE
+                  WHEN sessions.started_at IS NULL OR excluded.started_at < sessions.started_at
+                  THEN excluded.started_at ELSE sessions.started_at END,
+              ended_at = CASE
+                  WHEN sessions.ended_at IS NULL OR excluded.ended_at > sessions.ended_at
+                  THEN excluded.ended_at ELSE sessions.ended_at END,
+              turn_count = sessions.turn_count + 1,
+              input_tokens = sessions.input_tokens + excluded.input_tokens,
+              output_tokens = sessions.output_tokens + excluded.output_tokens,
+              cache_creation_tokens = sessions.cache_creation_tokens + excluded.cache_creation_tokens,
+              cache_read_tokens = sessions.cache_read_tokens + excluded.cache_read_tokens
+        """,
+        (
+            session_id, source, project_path, ts, ts,
+            int(usage.get("input_tokens", 0) or 0),
+            int(usage.get("output_tokens", 0) or 0),
+            int(usage.get("cache_creation_tokens", 0) or 0),
+            int(usage.get("cache_read_tokens", 0) or 0),
+        ),
+    )
+
+
+def _upsert_tool_calls(conn, session_id: str, tool_names: list):
+    for name in tool_names or []:
+        if not name:
+            continue
+        conn.execute(
+            """INSERT INTO tool_calls (session_id, tool_name, call_count) VALUES (?, ?, 1)
+               ON CONFLICT(session_id, tool_name) DO UPDATE SET call_count = call_count + 1""",
+            (session_id, name),
+        )
 
 def _delete_chunks_from(conn, session_id: str, from_index: int):
     ids = conn.execute(
@@ -123,6 +170,9 @@ def index_file(
         chunks = []
         for turn in batch_turns:
             chunks.extend(make_chunks(turn, session_id, project_path, source=source))
+            if not turn.get("provisional"):
+                _upsert_session(conn, session_id, source, project_path, turn)
+                _upsert_tool_calls(conn, session_id, turn.get("tool_names") or [])
 
         if not chunks:
             continue
@@ -162,15 +212,16 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     ).fetchone()
 
     source = chunk.get("source", "claude-code")
+    git_branch = chunk.get("git_branch")
     if row:
         chunk_id = row[0]
         conn.execute(
             """UPDATE chunks SET timestamp = ?, project_path = ?,
-               chunk_text = ?, tool_result_text = ?, source = ?
+               chunk_text = ?, tool_result_text = ?, source = ?, git_branch = ?
                WHERE id = ?""",
             (chunk["timestamp"], chunk["project_path"],
              chunk["chunk_text"], chunk.get("tool_result_text", ""),
-             source, chunk_id),
+             source, git_branch, chunk_id),
         )
         conn.execute(
             "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
@@ -183,11 +234,11 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     else:
         cursor = conn.execute(
             """INSERT INTO chunks
-            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source, git_branch)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (chunk["session_id"], chunk["message_index"], chunk["split_index"],
              chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
-             chunk.get("tool_result_text", ""), source),
+             chunk.get("tool_result_text", ""), source, git_branch),
         )
         chunk_id = cursor.lastrowid
         conn.execute(

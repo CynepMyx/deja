@@ -4,7 +4,7 @@ import sys
 
 import sqlite_vec
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
 
@@ -37,6 +37,8 @@ def _migrate_if_needed(conn: sqlite3.Connection):
         DROP TABLE IF EXISTS indexed_files;
         DROP TABLE IF EXISTS chunks_vec;
         DROP TABLE IF EXISTS chunks_fts;
+        DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS tool_calls;
     """)
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
@@ -66,6 +68,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             chunk_text TEXT NOT NULL,
             tool_result_text TEXT,
             source TEXT NOT NULL DEFAULT 'claude-code',
+            git_branch TEXT,
+            parent_id INTEGER REFERENCES chunks(id),
             UNIQUE(session_id, message_index, split_index)
         );
 
@@ -76,6 +80,26 @@ def init_db(db_path: str) -> sqlite3.Connection:
             last_size INTEGER NOT NULL,
             source TEXT NOT NULL DEFAULT 'claude-code',
             next_message_index INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            project_path TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            session_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            call_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, tool_name)
         );
 
         CREATE TABLE IF NOT EXISTS meta (
@@ -102,6 +126,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_project_time ON chunks(project_path, timestamp);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+        CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(git_branch);
+        CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
     """)
 
     meta_defaults = {

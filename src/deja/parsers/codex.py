@@ -77,6 +77,8 @@ def _build_turn(
     user_text: str,
     asst_parts: list[str],
     tool_parts: list[str],
+    tool_names: list[str],
+    git_branch: str | None,
     timestamp: str,
     message_index: int,
     completed_offset: int,
@@ -89,6 +91,9 @@ def _build_turn(
         "timestamp": timestamp,
         "message_index": message_index,
         "completed_offset": completed_offset,
+        "git_branch": git_branch,
+        "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0},
+        "tool_names": list(tool_names),
     }
     turn = redact_turn(turn)
     turn["tool_result_text"] = turn["tool_result_text"][:TOOL_RESULT_MAX]
@@ -108,6 +113,8 @@ def parse(
     pending_user = None
     asst_parts: list[str] = []
     tool_parts: list[str] = []
+    tool_names: list[str] = []
+    git_branch: str | None = None
     pending_ts = ""
     turn_start = offset
     message_index = start_message_index
@@ -131,10 +138,16 @@ def parse(
                 print(f"[deja] skipping malformed line in {path}", file=sys.stderr)
                 continue
 
-            if entry.get("type") != "response_item":
+            etype = entry.get("type")
+            payload = entry.get("payload", {}) or {}
+
+            if etype == "session_meta":
+                git_branch = (payload.get("git") or {}).get("branch")
                 continue
 
-            payload = entry.get("payload", {}) or {}
+            if etype != "response_item":
+                continue
+
             ptype = payload.get("type", "")
             role = payload.get("role", "")
             ts = entry.get("timestamp", "")
@@ -142,13 +155,14 @@ def parse(
             if ptype == "message" and role == "user":
                 if pending_user is not None and asst_parts:
                     yield _build_turn(
-                        pending_user, asst_parts, tool_parts,
-                        pending_ts, message_index, line_start,
+                        pending_user, asst_parts, tool_parts, tool_names,
+                        git_branch, pending_ts, message_index, line_start,
                     )
                     message_index += 1
                 pending_user = _extract_message_text(payload)
                 asst_parts = []
                 tool_parts = []
+                tool_names = []
                 pending_ts = ts
                 turn_start = line_start
 
@@ -163,6 +177,9 @@ def parse(
                 if pending_user is None:
                     continue
                 tool_parts.append(_format_tool_call(payload))
+                name = payload.get("name")
+                if name:
+                    tool_names.append(name)
 
             elif ptype in ("function_call_output", "custom_tool_call_output"):
                 if pending_user is None:
@@ -174,8 +191,8 @@ def parse(
 
         if pending_user is not None and asst_parts:
             turn = _build_turn(
-                pending_user, asst_parts, tool_parts,
-                pending_ts, message_index, turn_start,
+                pending_user, asst_parts, tool_parts, tool_names,
+                git_branch, pending_ts, message_index, turn_start,
             )
             turn["provisional"] = True
             yield turn

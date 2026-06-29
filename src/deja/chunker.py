@@ -43,6 +43,7 @@ def make_chunks(
             "timestamp": turn.get("timestamp", ""),
             "project_path": project_path,
             "source": source,
+            "git_branch": turn.get("git_branch"),
         }
         for i, part in enumerate(parts)
     ]

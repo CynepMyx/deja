@@ -10,7 +10,7 @@ def _write_jsonl(path, lines):
 
 def test_extract_text_content():
     content = [{"type": "text", "text": "Hello world"}]
-    text, tool_text = extract_content(content)
+    text, tool_text, _ = extract_content(content)
     assert text == "Hello world"
     assert tool_text == ""
 
@@ -19,7 +19,7 @@ def test_extract_tool_use():
         {"type": "text", "text": "Let me check"},
         {"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}},
     ]
-    text, tool_text = extract_content(content)
+    text, tool_text, _ = extract_content(content)
     assert "Let me check" in text
     assert "[Tool: Bash] ls -la" in text
 
@@ -27,7 +27,7 @@ def test_extract_tool_result_separate():
     content = [
         {"type": "tool_result", "content": "total 42\ndrwxr-xr-x 2 user user 4096 file.txt"}
     ]
-    text, tool_text = extract_content(content)
+    text, tool_text, _ = extract_content(content)
     assert text == ""
     assert "total 42" in tool_text
 
@@ -36,7 +36,7 @@ def test_extract_skips_thinking():
         {"type": "thinking", "thinking": "Let me think..."},
         {"type": "text", "text": "Here is the answer"},
     ]
-    text, tool_text = extract_content(content)
+    text, tool_text, _ = extract_content(content)
     assert "think" not in text.lower()
     assert "Here is the answer" in text
 

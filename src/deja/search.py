@@ -110,31 +110,39 @@ def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> l
     return results
 
 
-def _annotate_source(conn, results: list[dict]) -> list[dict]:
+def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
+    """Hydrate each result with source + git_branch from chunks."""
     if not results:
         return results
     ids = [r["id"] for r in results]
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, source FROM chunks WHERE id IN ({placeholders})", ids
+        f"SELECT id, source, git_branch FROM chunks WHERE id IN ({placeholders})", ids
     ).fetchall()
-    source_by_id = {row[0]: row[1] for row in rows}
+    meta = {row[0]: (row[1], row[2]) for row in rows}
     for r in results:
-        r["source"] = source_by_id.get(r["id"], "claude-code")
+        src, branch = meta.get(r["id"], ("claude-code", None))
+        r["source"] = src
+        r["git_branch"] = branch
     return results
+
+
+# Backwards-compat alias for any external callers.
+_annotate_source = _annotate_metadata
 
 
 def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
-    source: str = None, time_decay: bool = False,
+    source: str = None, git_branch: str = None, git_branch_prefix: str = None,
+    time_decay: bool = False,
 ) -> list[dict]:
-    has_filters = project or date_from or date_to or source
+    has_filters = project or date_from or date_to or source or git_branch or git_branch_prefix
     k = 100 if has_filters else 20
     vec_results = _vector_search(conn, model, query, k=k)
     fts_results = _fts_search(conn, query, k=k)
     merged = _rrf_merge(vec_results, fts_results)
-    merged = _annotate_source(conn, merged)
+    merged = _annotate_metadata(conn, merged)
 
     if time_decay:
         merged = _apply_time_decay(merged)
@@ -143,6 +151,10 @@ def hybrid_search(
         merged = [r for r in merged if r.get("project_path") == project]
     if source:
         merged = [r for r in merged if r.get("source") == source]
+    if git_branch:
+        merged = [r for r in merged if r.get("git_branch") == git_branch]
+    if git_branch_prefix:
+        merged = [r for r in merged if (r.get("git_branch") or "").startswith(git_branch_prefix)]
     if date_from:
         merged = [r for r in merged if r.get("timestamp", "") >= date_from]
     if date_to:
