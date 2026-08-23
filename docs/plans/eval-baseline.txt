@@ -1,0 +1,40 @@
+Loading model...
+Evaluating 30 queries @ limit=5
+
+  HIT  (rank 1)  0.497s  Павел Елисеев
+  MISS           0.142s  настройка nginx reverse proxy
+  MISS           0.079s  SSL Let's Encrypt certbot
+  HIT  (rank 1)  0.062s  docker-compose deployment
+  HIT  (rank 2)  0.070s  Kwork отклик на заказ
+  HIT  (rank 1)  0.069s  fail2ban настройка блокировка
+  MISS           0.060s  FreelanceRadar monitor scoring
+  HIT  (rank 2)  0.062s  DevOps MCP ssh_exec
+  MISS           0.069s  DNS Cloudflare домен настройка
+  MISS           0.060s  MySQL медленный запрос индекс оптимизация
+  MISS           0.075s  WordPress миграция перенос сайта
+  MISS           0.078s  Yandex Cloud CDN настройка
+  HIT  (rank 1)  0.168s  memory MEMORY.md junction инцидент
+  HIT  (rank 1)  0.032s  TechPulse Telegram канал
+  MISS           0.219s  как настроить HTTPS на сервере
+  MISS           0.052s  OpenClaw AI офис агенты
+  HIT  (rank 3)  0.061s  humanizer текст AI
+  MISS           0.065s  парсер OpenCart товары медленно
+  MISS           0.070s  WebSocket proxy Bubble
+  MISS           0.084s  Selectel CDN vpnbests
+  MISS           0.065s  редактирование кворка trumbowyg
+  HIT  (rank 1)  0.096s  Redis кэширование
+  MISS           0.029s  Grafana мониторинг dashboard
+  MISS           0.124s  git commit push deploy
+  MISS           0.112s  PHP memory_limit apache
+  MISS           0.028s  Nanobot heartbeat
+  HIT  (rank 1)  0.054s  Playwright browser automation snapshot
+  HIT  (rank 1)  0.082s  сайт визитка DevOps портфолио
+  HIT  (rank 2)  0.080s  скил skill Claude Code создание
+  MISS           0.097s  review ревью сессий анализ
+
+==================================================
+MRR@5:        0.3278
+Hits:          12/30 (40%)
+Misses:        18/30
+Avg latency:   95ms
+Total time:    2.8s
