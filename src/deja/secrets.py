@@ -37,8 +37,12 @@ PATTERNS = [
     re.compile(r'://[^:/@\s]+:([^@\s]{6,})@'),
     # login / password pairs (slash separated)
     re.compile(r'(?i)(?:логин|login)\s*/\s*\S+\s*/\s*(\S{6,})'),
-    # Truncation fallback: BEGIN header without END still gets redacted
-    re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]+'),
+    # Truncation fallback: BEGIN header without END still gets redacted.
+    # Bounded to base64 body characters instead of `[\s\S]+`: the greedy version
+    # runs to the end of the input, which is harmless on a 1500-char chunk but
+    # eats whole files when redact() is called on larger text. The key body is
+    # base64, so the match stops at the first character that cannot belong to it.
+    re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\sA-Za-z0-9+/=]{0,8000}'),
     # Bare well-known token formats (appear in env dumps / configs without assignment context)
     re.compile(r'\bsk-(?:ant|proj)-[A-Za-z0-9_\-]{16,}'),
     re.compile(r'\b(?:dop_v1_|doo_v1_|dor_v1_|figd_)[A-Za-z0-9_\-]{15,}'),
