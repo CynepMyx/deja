@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-08-24)
 
 ### Features
 
@@ -13,6 +13,10 @@
 ### Fixes
 
 - **Truncated-private-key pattern no longer eats the rest of the input.** The fallback for a `BEGIN` header without a matching `END` ended in `[\s\S]+`. Inside deja that is invisible, because `redact()` only ever sees a 1500-char chunk, but called on larger text it silently deleted everything after the key — on an archived transcript, 6910 lines. The match is now bounded to base64 body characters and stops at the first character that cannot belong to a key.
+
+### Schema
+
+- Unchanged, still SCHEMA_VERSION 4. Upgrading from 0.5.0 does **not** trigger a reindex. Run `deja index --source review-extract` once to pick up the new source.
 
 ### Tests
 
