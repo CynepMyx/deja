@@ -61,7 +61,7 @@ def test_truncated_private_key_redacted():
 @pytest.mark.parametrize("token", [
     "sk-ant-api03-AbCdEf123456789012345678901234",
     "sk-proj-AbCdEf12345678901234567890",
-    "dop_v1_151a47ab23c4def567890abcdef1234567890abcd",
+    "dop_v1_0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpM",
     "AIzaSyA-1234567890abcdefghijklmnopqrstuv",
     "sk_live_4eC39HqLyjWDarjtT1zdp7dc12345",
