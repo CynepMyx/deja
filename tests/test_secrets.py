@@ -61,7 +61,7 @@ def test_truncated_private_key_redacted():
 @pytest.mark.parametrize("token", [
     "sk-ant-api03-AbCdEf123456789012345678901234",
     "sk-proj-AbCdEf12345678901234567890",
-    "dop_v1_151a47ab23c4def567890abcdef1234567890abcd",
+    "dop_v1_0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpM",
     "AIzaSyA-1234567890abcdefghijklmnopqrstuv",
     "sk_live_4eC39HqLyjWDarjtT1zdp7dc12345",
@@ -97,3 +97,29 @@ def test_redact_bare_tokens_variants(token):
 def test_npm_env_vars_not_redacted():
     text = "npm_package_version=1.2.3 npm_config_registry=https://r.npmjs.org npm_lifecycle_event=postinstall"
     assert redact(text) == text
+
+
+def test_truncated_key_does_not_eat_following_text():
+    r"""Регрессия: жадный `[\s\S]+` съедал весь ввод после заголовка ключа.
+
+    На чанке в 1500 символов это незаметно, но redact() вызывают и на большем
+    тексте — там пропадали целые файлы (в архиве сессий 6910 строк за раз).
+    """
+    text = (
+        "-----BEGIN OPENSSH PRIVATE KEY----- "
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn\n\n"
+        "Дальше идёт обычный разговор, который терять нельзя.\n"
+        "И ещё строка после него."
+    )
+    result = redact(text)
+    assert "b3BlbnNzaC1rZXktdjEA" not in result
+    assert REDACTED in result
+    assert "Дальше идёт обычный разговор, который терять нельзя." in result
+    assert "И ещё строка после него." in result
+
+
+def test_truncated_key_still_redacted_to_the_end_when_alone():
+    text = "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEpAIBAAKCAQEA" * 100
+    result = redact(text)
+    assert "MIIEpAIBAAKCAQEA" not in result
+    assert result.strip() == REDACTED

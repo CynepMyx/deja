@@ -1,8 +1,9 @@
-from deja.parsers import claude_code, codex
+from deja.parsers import claude_code, codex, review_extract
 
 PARSERS = {
     claude_code.SOURCE: claude_code,
     codex.SOURCE: codex,
+    review_extract.SOURCE: review_extract,
 }
 
 

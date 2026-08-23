@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Third source: `review-extract`** — indexes the markdown digests written by `extract_sessions.py` to `~/.claude/reviews/sessions`. These outlive the transcripts they came from: `cleanupPeriodDays` deletes `.jsonl` files after 30 days, so for early sessions the digest is the only surviving copy. `deja index --source review-extract`, or picked up by `--source all`.
+  - `project_path` is encoded the way Claude Code names its project directories and verified against an existing directory under `~/.claude/projects`, so the same project is not counted twice.
+  - Timestamps are full ISO — `search.py` feeds them to `fromisoformat` for time decay.
+  - Byte offsets tracked per turn, so incremental resume works the same as for the other sources.
+  - Files holding only slash commands yield no turns, matching `claude_code` behaviour.
+
+### Fixes
+
+- **Truncated-private-key pattern no longer eats the rest of the input.** The fallback for a `BEGIN` header without a matching `END` ended in `[\s\S]+`. Inside deja that is invisible, because `redact()` only ever sees a 1500-char chunk, but called on larger text it silently deleted everything after the key — on an archived transcript, 6910 lines. The match is now bounded to base64 body characters and stops at the first character that cannot belong to a key.
+
+### Tests
+
+- 107 total (was 105): 13 for the new parser, 2 regression tests for the key pattern.
+
+
 ## 0.5.0 (2026-06-29)
 
 ### Features
