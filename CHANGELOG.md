@@ -12,6 +12,7 @@
   - The exclusion is pushed into both retrieval lanes rather than applied to the merged result. A post-filter let sub-agent chunks consume the candidate slots first: on a 276k-chunk index that is 60% sub-agent, broad FTS queries lost half to three quarters of the keyword lane before the merge.
 - **Sub-agent threads link back to the session that spawned them.** `sessions.parent_session_id` is derived from the transcript path, surfaced on every search result, and walkable in the other direction via the new `list_subagent_threads` MCP tool — a delegated finding leads back to the conversation it came from.
 - **`deja analytics` is sub-agent aware.** Delegated threads are separate rows in `sessions`; counting them turned "how many sessions did I have" into "how many threads ran" and let delegated work own the per-session rankings. Excluded by default, `--include-subagents` to opt in.
+- **`deja stats` prints its session count broken down by kind**, so it no longer silently disagrees with `deja analytics` about what counts as a session.
 - **`deja stats` and `deja search` report a stale index instead of crashing.** Both opened the database without checking its schema version and died on a missing column; `stats` now keeps printing the rest of its diagnostics and flags the mismatch as an issue.
 
 ### Schema
@@ -24,7 +25,7 @@
 
 ### Tests
 
-- 120 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
+- 123 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
 
 
 ## 0.6.0 (2026-08-24)

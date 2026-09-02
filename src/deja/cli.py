@@ -1,6 +1,7 @@
 import os
 import sys
 import glob
+import sqlite3
 import argparse
 
 if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
@@ -14,9 +15,14 @@ from deja.parsers.registry import all_sources, get_parser
 
 def _require_current_schema(conn):
     """Exit with an actionable message instead of a column-missing traceback."""
-    row = conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # An index file can exist without a schema: zero-byte, half-copied,
+        # or an interrupted first run. Treat that as version 0.
+        row = None
     db_version = int(row[0]) if row else 0
     if db_version != SCHEMA_VERSION:
         print(
@@ -140,9 +146,14 @@ def cmd_stats():
             " - run 'deja index'"
         )
         by_kind = []
+        sessions_by_kind = []
     else:
         by_kind = conn.execute(
             "SELECT kind, COUNT(*) FROM chunks GROUP BY kind ORDER BY kind"
+        ).fetchall()
+        sessions_by_kind = conn.execute(
+            "SELECT kind, COUNT(DISTINCT session_id) FROM chunks"
+            " GROUP BY kind ORDER BY kind"
         ).fetchall()
     if chunks != vectors:
         issues.append(f"chunks ({chunks}) != vectors ({vectors})")
@@ -160,7 +171,11 @@ def cmd_stats():
         print(f"  {kind + ':':10}{count:,}")
     print(f"Vectors:    {vectors:,}")
     print(f"FTS:        {fts:,}")
+    # Counts every transcript, delegated threads included — `deja analytics`
+    # counts user-facing sessions only, so spell the split out here.
     print(f"Sessions:   {sessions}")
+    for kind, count in sessions_by_kind:
+        print(f"  {kind + ':':10}{count:,}")
     print(f"Projects:   {projects}")
     print(f"Files:      {files}")
     print(f"Model:      {meta.get('embedding_model', '?')}")
