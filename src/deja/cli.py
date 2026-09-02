@@ -12,6 +12,21 @@ from deja.indexer import get_embedding_model, index_file, gc_orphans
 from deja.config import get_index_dir, get_index_path
 from deja.parsers.registry import all_sources, get_parser
 
+def _require_current_schema(conn):
+    """Exit with an actionable message instead of a column-missing traceback."""
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()
+    db_version = int(row[0]) if row else 0
+    if db_version != SCHEMA_VERSION:
+        print(
+            f"[deja] index schema v{db_version}, expected v{SCHEMA_VERSION}. "
+            "Run 'deja index' to upgrade it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _acquire_lock():
     index_dir = get_index_dir()
     lock_path = os.path.join(index_dir, "index.lock")
@@ -118,6 +133,17 @@ def cmd_stats():
 
     # Consistency check
     issues = []
+    stale_schema = int(meta.get("schema_version", "0")) != SCHEMA_VERSION
+    if stale_schema:
+        issues.append(
+            f"schema v{meta.get('schema_version', '?')}, expected v{SCHEMA_VERSION}"
+            " - run 'deja index'"
+        )
+        by_kind = []
+    else:
+        by_kind = conn.execute(
+            "SELECT kind, COUNT(*) FROM chunks GROUP BY kind ORDER BY kind"
+        ).fetchall()
     if chunks != vectors:
         issues.append(f"chunks ({chunks}) != vectors ({vectors})")
     if chunks != fts:
@@ -130,14 +156,11 @@ def cmd_stats():
         issues.append(f"{orphans} orphan vector rows")
 
     print(f"Chunks:     {chunks:,}")
+    for kind, count in by_kind:
+        print(f"  {kind + ':':10}{count:,}")
     print(f"Vectors:    {vectors:,}")
     print(f"FTS:        {fts:,}")
     print(f"Sessions:   {sessions}")
-    by_kind = conn.execute(
-        "SELECT kind, COUNT(*) FROM chunks GROUP BY kind ORDER BY kind"
-    ).fetchall()
-    for kind, count in by_kind:
-        print(f"  {kind + ':':10}{count:,} chunks")
     print(f"Projects:   {projects}")
     print(f"Files:      {files}")
     print(f"Model:      {meta.get('embedding_model', '?')}")
@@ -175,6 +198,7 @@ def cmd_search(args):
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
+    _require_current_schema(conn)
 
     print("Loading model...", file=sys.stderr)
     model = get_embedding_model()
@@ -212,7 +236,11 @@ def cmd_analytics(args):
         sys.exit(1)
 
     conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
-    report = analytics.collect_all(conn, top=args.top, since_days=args.since_days)
+    _require_current_schema(conn)
+    report = analytics.collect_all(
+        conn, top=args.top, since_days=args.since_days,
+        include_subagents=args.include_subagents,
+    )
     conn.close()
 
     if args.format == "json":
@@ -298,6 +326,11 @@ def main():
     an.add_argument("--top", type=int, default=10, help="Top N in each ranking (default: 10)")
     an.add_argument("--since-days", type=int, default=30, help="By-day window (default: 30)")
     an.add_argument("--format", choices=["human", "json"], default="human")
+    an.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Count sub-agent threads as sessions (excluded by default)",
+    )
 
     ev = sub.add_parser("eval", help="Evaluate search quality with golden pairs")
     ev.add_argument("--golden", default=None, help="Path to golden_pairs.json")

@@ -11,11 +11,61 @@ EMBEDDING_DIM = 384
 def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
 
-def _migrate_if_needed(conn: sqlite3.Connection):
-    """Drop index tables when the on-disk schema version differs.
+# Version -> statements that upgrade the previous version in place. A version
+# listed here adds columns only, so the existing rows and — crucially — the
+# existing embeddings survive. Anything not listed falls back to a rebuild.
+ADDITIVE_MIGRATIONS = {
+    # Sub-agent threads were not indexed before v5, so every existing row is
+    # correctly a 'main' row and the column default needs no backfill.
+    5: [
+        "ALTER TABLE chunks ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
+        "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
+    ],
+}
 
-    Tables are recreated by init_db right after; data is rebuilt by the
-    next `deja index`. Must run before any DDL that references new columns.
+
+def _try_additive_migration(conn: sqlite3.Connection, db_version: int) -> bool:
+    """Upgrade in place if every step from db_version to HEAD is additive.
+
+    Returns False without touching the database if any step is missing or
+    fails, leaving the caller to fall back to dropping and rebuilding.
+    """
+    steps = []
+    for version in range(db_version + 1, SCHEMA_VERSION + 1):
+        if version not in ADDITIVE_MIGRATIONS:
+            return False
+        steps.extend(ADDITIVE_MIGRATIONS[version])
+
+    try:
+        conn.execute("SAVEPOINT additive_migration")
+        for statement in steps:
+            conn.execute(statement)
+        conn.execute("RELEASE additive_migration")
+    except sqlite3.Error as e:
+        conn.execute("ROLLBACK TO additive_migration")
+        conn.execute("RELEASE additive_migration")
+        print(f"[deja] in-place migration failed ({e}), rebuilding", file=sys.stderr)
+        return False
+
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
+    conn.commit()
+    print(
+        f"[deja] schema v{db_version} -> v{SCHEMA_VERSION}: "
+        "migrated in place, embeddings kept",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _migrate_if_needed(conn: sqlite3.Connection):
+    """Bring the on-disk schema to SCHEMA_VERSION.
+
+    Additive upgrades are applied in place. Anything else drops the index
+    tables — recreated by init_db right after, repopulated by the next
+    `deja index`. Must run before any DDL that references new columns.
     """
     has_meta = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -25,6 +75,9 @@ def _migrate_if_needed(conn: sqlite3.Connection):
 
     db_version = int(get_meta(conn).get("schema_version", "0"))
     if db_version == SCHEMA_VERSION:
+        return
+
+    if _try_additive_migration(conn, db_version):
         return
 
     print(

@@ -122,3 +122,80 @@ def test_indexed_subagent_rows_are_tagged():
             "SELECT kind FROM sessions WHERE session_id = 'agent-sub'"
         ).fetchone()[0] == "subagent"
         conn.close()
+
+
+def test_subagent_exclusion_is_pushed_into_both_lanes():
+    """A post-filter would let sub-agent chunks eat every candidate slot."""
+    from deja.search import _fts_search, _vector_search
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = init_db(os.path.join(tmp, "t.db"))
+        model = get_embedding_model()
+        # One main session against many sub-agent threads on the same topic.
+        main = os.path.join(tmp, "main.jsonl")
+        _write_session(main, "How do I configure nginx?", "Edit nginx.conf")
+        index_file(conn, model, main, "proj", kind="main")
+        for i in range(12):
+            sub = os.path.join(tmp, f"agent-{i}.jsonl")
+            _write_session(sub, "How do I configure nginx?", "nginx proxy_pass here")
+            index_file(conn, model, sub, "proj", kind="subagent")
+
+        # k smaller than the sub-agent population: a post-filter would return 0.
+        assert _fts_search(conn, "nginx", k=3, exclude_kind="subagent")
+        assert _vector_search(conn, model, "nginx", k=3, exclude_kind="subagent")
+        assert hybrid_search(conn, model, "nginx", limit=5)
+        conn.close()
+
+
+def test_v4_index_migrates_in_place_without_dropping_embeddings():
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "t.db")
+        conn = init_db(db_path)
+        conn.execute(
+            "INSERT INTO chunks (session_id, message_index, split_index, chunk_text)"
+            " VALUES ('s', 0, 0, 'text')"
+        )
+        conn.execute("INSERT INTO chunks_vec (rowid, embedding) VALUES (1, ?)",
+                     (b"\x00" * (384 * 4),))
+        # Roll back to the pre-kind schema.
+        conn.execute("DROP INDEX idx_chunks_kind")
+        conn.execute("ALTER TABLE chunks DROP COLUMN kind")
+        conn.execute("ALTER TABLE sessions DROP COLUMN kind")
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+        conn.commit()
+        conn.close()
+
+        conn = init_db(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0] == 1
+        assert conn.execute("SELECT kind FROM chunks").fetchone()[0] == "main"
+        assert conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "5"
+        conn.close()
+
+
+def test_analytics_excludes_subagent_sessions_by_default():
+    from deja import analytics
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = init_db(os.path.join(tmp, "t.db"))
+        for sid, kind, turns in (("main-1", "main", 5), ("agent-1", "subagent", 90)):
+            conn.execute(
+                "INSERT INTO sessions (session_id, source, kind, project_path,"
+                " started_at, turn_count, input_tokens) VALUES (?, 'claude-code', ?,"
+                " 'proj', '2026-03-30T10:00:00Z', ?, ?)",
+                (sid, kind, turns, turns * 10),
+            )
+        conn.commit()
+
+        default = analytics.collect_all(conn)
+        assert default["totals"]["sessions"] == 1
+        assert default["top_length"][0]["session_id"] == "main-1"
+
+        full = analytics.collect_all(conn, include_subagents=True)
+        assert full["totals"]["sessions"] == 2
+        assert full["top_length"][0]["session_id"] == "agent-1"
+        conn.close()

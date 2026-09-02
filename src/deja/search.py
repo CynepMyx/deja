@@ -14,10 +14,19 @@ def fts5_escape(query: str) -> str:
     escaped = ['"' + t.replace('"', '""') + '"' for t in tokens]
     return " AND ".join(escaped)
 
-def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
+# vec0 cannot filter on a metadata column, so an excluded kind is filtered
+# after the KNN query. Over-fetch and widen until enough rows survive.
+OVERFETCH_FACTOR = 4
+OVERFETCH_MAX = 2000
+
+
+def _vector_search(
+    conn, model, query: str, k: int = 20, exclude_kind: str = None
+) -> list[dict]:
     query_embedding = list(model.embed([query]))[0]
-    rows = conn.execute(
-        """
+    blob = serialize_f32(query_embedding.tolist())
+
+    sql = """
         WITH vec_results AS (
             SELECT rowid, distance
             FROM chunks_vec
@@ -29,9 +38,21 @@ def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
                v.distance
         FROM vec_results v
         JOIN chunks c ON c.id = v.rowid
-        """,
-        (serialize_f32(query_embedding.tolist()), k),
-    ).fetchall()
+    """
+    params: list = [blob, k]
+    if exclude_kind:
+        sql += " WHERE c.kind != ?"
+        params.append(exclude_kind)
+    sql += " ORDER BY v.distance"
+
+    fetch = k
+    while True:
+        params[1] = fetch
+        rows = conn.execute(sql, params).fetchall()
+        if not exclude_kind or len(rows) >= k or fetch >= OVERFETCH_MAX:
+            break
+        fetch = min(fetch * OVERFETCH_FACTOR, OVERFETCH_MAX)
+    rows = rows[:k]
 
     return [
         {
@@ -42,21 +63,23 @@ def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
         for r in rows
     ]
 
-def _fts_search(conn, query: str, k: int = 20) -> list[dict]:
+def _fts_search(conn, query: str, k: int = 20, exclude_kind: str = None) -> list[dict]:
     escaped = fts5_escape(query)
+    kind_clause = "AND c.kind != ?" if exclude_kind else ""
+    params = [escaped, exclude_kind, k] if exclude_kind else [escaped, k]
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT c.id, c.session_id, c.message_index, c.timestamp,
                    c.project_path, c.chunk_text, c.tool_result_text,
                    rank
             FROM chunks_fts f
             JOIN chunks c ON c.id = f.rowid
-            WHERE chunks_fts MATCH ?
+            WHERE chunks_fts MATCH ? {kind_clause}
             ORDER BY rank
             LIMIT ?
             """,
-            (escaped, k),
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -133,18 +156,6 @@ def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
 _annotate_source = _annotate_metadata
 
 
-def _index_has_subagents(conn) -> bool:
-    """Whether the index holds sub-agent chunks at all.
-
-    Excluding them only costs recall when they exist, so indexes without
-    sub-agent threads keep the narrow (cheaper) candidate pool.
-    """
-    row = conn.execute(
-        "SELECT 1 FROM chunks WHERE kind = 'subagent' LIMIT 1"
-    ).fetchone()
-    return row is not None
-
-
 def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
@@ -154,17 +165,18 @@ def hybrid_search(
     """Hybrid vector + FTS search over indexed turns.
 
     include_subagents: sub-agent threads are excluded by default so results
-    stay on the user-facing conversation. They often outnumber main sessions,
-    so excluding them counts as a filter and widens the candidate pool.
+    stay on the user-facing conversation. The exclusion is pushed into both
+    retrieval lanes rather than applied afterwards — sub-agent threads can
+    outnumber main ones several times over, and a post-filter would let them
+    consume every candidate slot before the merge.
     """
-    excluding_subagents = not include_subagents and _index_has_subagents(conn)
     has_filters = (
-        project or date_from or date_to or source or git_branch
-        or git_branch_prefix or excluding_subagents
+        project or date_from or date_to or source or git_branch or git_branch_prefix
     )
     k = 100 if has_filters else 20
-    vec_results = _vector_search(conn, model, query, k=k)
-    fts_results = _fts_search(conn, query, k=k)
+    exclude_kind = None if include_subagents else "subagent"
+    vec_results = _vector_search(conn, model, query, k=k, exclude_kind=exclude_kind)
+    fts_results = _fts_search(conn, query, k=k, exclude_kind=exclude_kind)
     merged = _rrf_merge(vec_results, fts_results)
     merged = _annotate_metadata(conn, merged)
 
@@ -175,8 +187,6 @@ def hybrid_search(
         merged = [r for r in merged if r.get("project_path") == project]
     if source:
         merged = [r for r in merged if r.get("source") == source]
-    if not include_subagents:
-        merged = [r for r in merged if r.get("kind", "main") != "subagent"]
     if git_branch:
         merged = [r for r in merged if r.get("git_branch") == git_branch]
     if git_branch_prefix:
