@@ -78,6 +78,19 @@ def _do_get_session(conn, session_id):
     ]
 
 
+def _do_list_subagents(conn, session_id):
+    rows = conn.execute(
+        """SELECT session_id, started_at, ended_at, turn_count
+           FROM sessions WHERE parent_session_id = ?
+           ORDER BY started_at""",
+        (session_id,),
+    ).fetchall()
+    return [
+        {"session_id": r[0], "started_at": r[1], "ended_at": r[2], "turn_count": r[3]}
+        for r in rows
+    ]
+
+
 def _do_get_context(conn, chunk_id, window):
     anchor = conn.execute(
         "SELECT session_id, message_index FROM chunks WHERE id = ?",
@@ -153,6 +166,20 @@ async def get_context(chunk_id: int, window: int = 2, ctx: Context = None) -> di
     if anchor_id is None:
         raise ToolError(f"Chunk {chunk_id} not found in index.")
     return {"anchor_id": anchor_id, "chunks": chunks}
+
+
+@mcp.tool()
+async def list_subagent_threads(session_id: str, ctx: Context = None) -> list[dict]:
+    """List the sub-agent threads a session delegated work to.
+
+    Pair with a `search` hit: a result whose kind is 'subagent' carries the
+    parent in `parent_session_id`, and this walks the same link the other way.
+    """
+    lc = ctx.lifespan_context
+    db = lc.get("db")
+    if db is None:
+        raise ToolError("Index not loaded. Run 'deja index' first.")
+    return await asyncio.to_thread(_do_list_subagents, db, session_id)
 
 
 @mcp.tool()

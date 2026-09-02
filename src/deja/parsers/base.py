@@ -1,6 +1,16 @@
 from typing import Iterator, Protocol
 
 
+def parent_session_id(parser, path: str) -> str | None:
+    """Parent session of a delegated thread, or None.
+
+    Optional per parser: sources without a sub-agent concept simply do not
+    define `parent_session_id`.
+    """
+    lookup = getattr(parser, "parent_session_id", None)
+    return lookup(path) if lookup else None
+
+
 class Parser(Protocol):
     """Source-specific session parser.
 

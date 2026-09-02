@@ -79,6 +79,13 @@ deja search "milvus schema" --include-subagents
 deja stats                        # chunk counts broken down by kind
 ```
 
+Each thread records the session that spawned it. A sub-agent hit carries
+`parent_session_id`, and `list_subagent_threads` walks the same link the
+other way, so a delegated finding never dead-ends.
+
+`deja analytics` counts only user-facing sessions for the same reason;
+pass `--include-subagents` to count delegated threads as well.
+
 ### Add to Claude Code
 
 Add to `~/.claude.json` under `mcpServers`:
@@ -103,6 +110,7 @@ Restart Claude Code — deja will appear as a connected MCP server.
 | `search` | Hybrid semantic + keyword search across all sessions |
 | `get_context` | Get a chunk with surrounding turns (±window) |
 | `get_session_chunks` | Get indexed chunks for a session (not raw messages) |
+| `list_subagent_threads` | List the sub-agent threads a session delegated work to |
 
 **search** parameters:
 - `query` (string) — what to search for

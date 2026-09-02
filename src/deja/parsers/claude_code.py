@@ -40,6 +40,20 @@ def discover() -> Iterator[tuple[str, str, str]]:
         ):
             yield jsonl, project_dir, KIND_SUBAGENT
 
+def parent_session_id(path: str) -> str | None:
+    """Session that spawned a sub-agent thread, read from its path.
+
+    `<project>/<session-id>/subagents/agent-*.jsonl` -> `<session-id>`.
+    Returns None for a main transcript.
+    """
+    subagents_dir, filename = os.path.split(path)
+    session_dir, dirname = os.path.split(subagents_dir)
+    if dirname != SUBAGENT_DIRNAME:
+        return None
+    parent = os.path.basename(session_dir)
+    return parent or None
+
+
 def extract_content(content) -> tuple[str, str, list[str]]:
     """Returns (text, tool_result, tool_names_used)."""
     if isinstance(content, str):
