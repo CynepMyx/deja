@@ -20,6 +20,7 @@ ADDITIVE_MIGRATIONS = {
     5: [
         "ALTER TABLE chunks ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
         "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
+        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
     ],
 }
 
@@ -140,6 +141,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             session_id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
             kind TEXT NOT NULL DEFAULT 'main',
+            parent_session_id TEXT,
             project_path TEXT,
             started_at TEXT,
             ended_at TEXT,
@@ -184,6 +186,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_chunks_kind ON chunks(kind);
         CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(git_branch);
         CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
     """)

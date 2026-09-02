@@ -163,6 +163,8 @@ def test_v4_index_migrates_in_place_without_dropping_embeddings():
         conn.execute("DROP INDEX idx_chunks_kind")
         conn.execute("ALTER TABLE chunks DROP COLUMN kind")
         conn.execute("ALTER TABLE sessions DROP COLUMN kind")
+        conn.execute("DROP INDEX idx_sessions_parent")
+        conn.execute("ALTER TABLE sessions DROP COLUMN parent_session_id")
         conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
         conn.commit()
         conn.close()
@@ -198,4 +200,63 @@ def test_analytics_excludes_subagent_sessions_by_default():
         full = analytics.collect_all(conn, include_subagents=True)
         assert full["totals"]["sessions"] == 2
         assert full["top_length"][0]["session_id"] == "agent-1"
+        conn.close()
+
+
+def test_parent_session_id_derived_from_path():
+    assert claude_code.parent_session_id(
+        os.path.join("p", "session-1", "subagents", "agent-x.jsonl")
+    ) == "session-1"
+    assert claude_code.parent_session_id(
+        os.path.join("p", "session-1.jsonl")
+    ) is None
+
+
+def test_indexed_subagent_links_back_to_parent():
+    with tempfile.TemporaryDirectory() as tmp:
+        project = os.path.join(tmp, "-home-user-proj")
+        subagents = os.path.join(project, "session-1", "subagents")
+        os.makedirs(subagents)
+        main = os.path.join(project, "session-1.jsonl")
+        sub = os.path.join(subagents, "agent-research.jsonl")
+        _write_session(main, "How do I configure nginx?", "Edit nginx.conf")
+        _write_session(sub, "How do I configure nginx?", "Set proxy_pass")
+
+        conn = init_db(os.path.join(tmp, "t.db"))
+        model = get_embedding_model()
+        index_file(conn, model, main, "proj", kind="main")
+        index_file(conn, model, sub, "proj", kind="subagent")
+
+        assert conn.execute(
+            "SELECT parent_session_id FROM sessions WHERE session_id = 'agent-research'"
+        ).fetchone()[0] == "session-1"
+        assert conn.execute(
+            "SELECT parent_session_id FROM sessions WHERE session_id = 'session-1'"
+        ).fetchone()[0] is None
+
+        hits = hybrid_search(conn, model, "nginx", limit=10, include_subagents=True)
+        by_kind = {h["kind"]: h for h in hits}
+        assert by_kind["subagent"]["parent_session_id"] == "session-1"
+        assert by_kind["main"]["parent_session_id"] is None
+        conn.close()
+
+
+def test_list_subagent_threads_walks_the_link_back():
+    from deja.server import _do_list_subagents
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = init_db(os.path.join(tmp, "t.db"))
+        conn.execute(
+            "INSERT INTO sessions (session_id, source, kind, parent_session_id,"
+            " started_at) VALUES ('agent-1', 'claude-code', 'subagent', 'session-1',"
+            " '2026-03-30T10:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO sessions (session_id, source, kind) "
+            "VALUES ('session-1', 'claude-code', 'main')"
+        )
+        conn.commit()
+        threads = _do_list_subagents(conn, "session-1")
+        assert [t["session_id"] for t in threads] == ["agent-1"]
+        assert _do_list_subagents(conn, "agent-1") == []
         conn.close()

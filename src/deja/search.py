@@ -134,21 +134,27 @@ def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> l
 
 
 def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
-    """Hydrate each result with source + kind + git_branch from chunks."""
+    """Hydrate each result with source, kind, git_branch and parent session."""
     if not results:
         return results
     ids = [r["id"] for r in results]
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, source, kind, git_branch FROM chunks WHERE id IN ({placeholders})",
+        f"""SELECT c.id, c.source, c.kind, c.git_branch, s.parent_session_id
+            FROM chunks c
+            LEFT JOIN sessions s ON s.session_id = c.session_id
+            WHERE c.id IN ({placeholders})""",
         ids,
     ).fetchall()
-    meta = {row[0]: (row[1], row[2], row[3]) for row in rows}
+    meta = {row[0]: (row[1], row[2], row[3], row[4]) for row in rows}
     for r in results:
-        src, kind, branch = meta.get(r["id"], ("claude-code", "main", None))
+        src, kind, branch, parent = meta.get(
+            r["id"], ("claude-code", "main", None, None)
+        )
         r["source"] = src
         r["kind"] = kind
         r["git_branch"] = branch
+        r["parent_session_id"] = parent
     return results
 
 
