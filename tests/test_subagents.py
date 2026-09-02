@@ -355,3 +355,17 @@ def test_gc_removes_a_deleted_subagent_thread():
             "SELECT COUNT(*) FROM chunks WHERE kind = 'main'"
         ).fetchone()[0] > 0
         conn.close()
+
+
+def test_server_startup_survives_an_index_without_a_meta_table():
+    """The lifespan must not raise: an MCP client only sees a closed pipe."""
+    import sqlite3
+    from deja.server import _schema_problem
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "empty.db")
+        open(path, "wb").close()
+        conn = sqlite3.connect(path)
+        problem = _schema_problem(conn)
+        assert problem and "v0" in problem and "deja index" in problem
+        conn.close()

@@ -26,7 +26,7 @@
 
 ### Tests
 
-- 125 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
+- 126 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
 
 
 ## 0.6.0 (2026-08-24)

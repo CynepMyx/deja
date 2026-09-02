@@ -14,10 +14,28 @@ def fts5_escape(query: str) -> str:
     escaped = ['"' + t.replace('"', '""') + '"' for t in tokens]
     return " AND ".join(escaped)
 
-# vec0 cannot filter on a metadata column, so an excluded kind is filtered
-# after the KNN query. Over-fetch and widen until enough rows survive.
+# vec0 cannot filter on a metadata column: the KNN picks its neighbours over
+# every chunk, and an excluded kind can eat all of them. Over-fetch and widen
+# until enough rows survive the join, bounded by the corpus itself.
 OVERFETCH_FACTOR = 4
 OVERFETCH_MAX = 2000
+
+_VEC_SQL = """
+    WITH vec_results AS (
+        SELECT rowid, distance
+        FROM chunks_vec
+        WHERE embedding MATCH ? AND k = ?
+        ORDER BY distance
+    )
+    SELECT c.id, c.session_id, c.message_index, c.timestamp,
+           c.project_path, c.chunk_text, c.tool_result_text,
+           v.distance
+    FROM vec_results v
+    JOIN chunks c ON c.id = v.rowid
+    {kind_clause}
+    ORDER BY v.distance
+    LIMIT ?
+"""
 
 
 def _vector_search(
@@ -25,44 +43,23 @@ def _vector_search(
 ) -> list[dict]:
     query_embedding = list(model.embed([query]))[0]
     blob = serialize_f32(query_embedding.tolist())
+    sql = _VEC_SQL.format(kind_clause="WHERE c.kind != ?" if exclude_kind else "")
+
+    if exclude_kind:
+        # Widening past the corpus only repeats the same full scan.
+        corpus = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        cap = min(OVERFETCH_MAX, max(corpus, k))
+    else:
+        cap = k
 
     fetch = k
     while True:
-        neighbours = conn.execute(
-            """SELECT rowid, distance FROM chunks_vec
-               WHERE embedding MATCH ? AND k = ?
-               ORDER BY distance""",
-            (blob, fetch),
-        ).fetchall()
-        if not neighbours:
-            return []
-
-        order = {rowid: i for i, (rowid, _) in enumerate(neighbours)}
-        distances = dict(neighbours)
-        placeholders = ",".join("?" * len(neighbours))
-        params: list = list(order)
-        kind_clause = ""
-        if exclude_kind:
-            kind_clause = " AND kind != ?"
-            params.append(exclude_kind)
-
-        rows = conn.execute(
-            f"""SELECT id, session_id, message_index, timestamp,
-                       project_path, chunk_text, tool_result_text
-                FROM chunks
-                WHERE id IN ({placeholders}){kind_clause}""",
-            params,
-        ).fetchall()
-
-        # Widening only helps while the KNN still has neighbours to give:
-        # a short result means the index is exhausted, not over-filtered.
-        exhausted = len(neighbours) < fetch
-        if not exclude_kind or len(rows) >= k or exhausted or fetch >= OVERFETCH_MAX:
+        params = [blob, fetch, exclude_kind, k] if exclude_kind else [blob, fetch, k]
+        rows = conn.execute(sql, params).fetchall()
+        if len(rows) >= k or fetch >= cap:
             break
-        fetch = min(fetch * OVERFETCH_FACTOR, OVERFETCH_MAX)
+        fetch = min(fetch * OVERFETCH_FACTOR, cap)
 
-    rows = sorted(rows, key=lambda r: order[r[0]])[:k]
-    rows = [(*r, distances[r[0]]) for r in rows]
     return [
         {
             "id": r[0], "session_id": r[1], "message_index": r[2],

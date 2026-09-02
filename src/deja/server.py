@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import sys
 import threading
 from contextlib import asynccontextmanager
@@ -15,7 +16,12 @@ from deja.config import get_index_path
 
 def _schema_problem(conn) -> str | None:
     """Describe a schema mismatch, or None when the index is usable."""
-    meta = get_meta(conn)
+    try:
+        meta = get_meta(conn)
+    except sqlite3.OperationalError:
+        # An index file can exist without a schema: zero-byte, half-copied,
+        # or an interrupted first run. Reads as version 0, same as the CLI.
+        meta = {}
     db_version = int(meta.get("schema_version", "0"))
     if db_version == SCHEMA_VERSION:
         return None
@@ -48,8 +54,18 @@ async def lifespan(server):
         yield {"model": None, "db": None}
         return
 
-    db = open_db_readonly(index_path)
-    problem = _schema_problem(db)
+    try:
+        db = open_db_readonly(index_path)
+        problem = _schema_problem(db)
+    except sqlite3.DatabaseError as e:
+        print(f"[deja] cannot open index at {index_path}: {e}", file=sys.stderr)
+        yield {
+            "model": None, "db": None,
+            "unavailable": f"Index at {index_path} is unreadable ({e}). "
+                           "Run 'deja index' to rebuild it.",
+        }
+        return
+
     if problem:
         # Failing here would kill the server at startup, and an MCP client
         # only reports that the connection closed. Stay up and let each tool
