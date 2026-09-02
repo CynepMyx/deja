@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Claude Code sub-agent threads are indexed.** Claude Code writes a separate transcript per delegated thread under `<project>/<session-id>/subagents/agent-*.jsonl`. Discovery only globbed `<project>/*.jsonl`, so all of it was silently invisible — on a workstation that delegates heavily these threads outnumber main sessions, and they hold work the main transcript never contains: delegated research, generated code, sub-agent-only tool calls.
+  - New `kind` column on `chunks` and `sessions`, `"main"` or `"subagent"`.
+  - `include_subagents` flag on `hybrid_search`, the `search` MCP tool and `deja search`. **Off by default** — a query should answer from the conversation the user actually had; opt in for full recall.
+  - Excluding sub-agents widens the candidate pool the same way other filters do, but only when the index actually holds sub-agent chunks — indexes without them keep the cheaper narrow pool.
+  - `deja stats` breaks chunk counts down by kind.
+
+### Schema
+
+- **SCHEMA_VERSION 4 → 5.** Upgrading drops and rebuilds the index tables; run `deja index` once to repopulate.
+
+### API
+
+- `Parser.discover()` now yields `(path, project_path, kind)` triples instead of pairs. Sources without a sub-agent concept yield `"main"`.
+
+### Tests
+
+- 114 total (was 107): 7 covering discovery, the schema default, chunk tagging, and both filter directions.
+
+
 ## 0.6.0 (2026-08-24)
 
 ### Features

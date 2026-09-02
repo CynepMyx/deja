@@ -37,13 +37,13 @@ def _release_lock(lock_fd):
     except OSError:
         pass
 
-def _collect_files(sources: list[str]) -> list[tuple[str, str, str]]:
-    """Return [(path, project_path, source), ...] across the requested sources."""
+def _collect_files(sources: list[str]) -> list[tuple[str, str, str, str]]:
+    """Return [(path, project_path, source, kind), ...] across the requested sources."""
     results = []
     for src in sources:
         parser = get_parser(src)
-        for path, project_path in parser.discover():
-            results.append((path, project_path, src))
+        for path, project_path, kind in parser.discover():
+            results.append((path, project_path, src, kind))
     return results
 
 
@@ -74,13 +74,14 @@ def cmd_index(args):
         print(f"[deja] found {len(files)} JSONL files", file=sys.stderr)
 
         known_paths = set()
-        for i, (path, project, src) in enumerate(files):
+        for i, (path, project, src, kind) in enumerate(files):
             known_paths.add(path)
+            label = src if kind == "main" else f"{src}/{kind}"
             print(
-                f"[deja] [{i+1}/{len(files)}] [{src}] {os.path.basename(path)}",
+                f"[deja] [{i+1}/{len(files)}] [{label}] {os.path.basename(path)}",
                 file=sys.stderr,
             )
-            index_file(conn, model, path, project, source=src)
+            index_file(conn, model, path, project, source=src, kind=kind)
 
         gc_orphans(conn, known_paths, sources=sources)
         conn.close()
@@ -132,6 +133,11 @@ def cmd_stats():
     print(f"Vectors:    {vectors:,}")
     print(f"FTS:        {fts:,}")
     print(f"Sessions:   {sessions}")
+    by_kind = conn.execute(
+        "SELECT kind, COUNT(*) FROM chunks GROUP BY kind ORDER BY kind"
+    ).fetchall()
+    for kind, count in by_kind:
+        print(f"  {kind + ':':10}{count:,} chunks")
     print(f"Projects:   {projects}")
     print(f"Files:      {files}")
     print(f"Model:      {meta.get('embedding_model', '?')}")
@@ -177,6 +183,7 @@ def cmd_search(args):
         conn, model, args.query, limit=args.limit,
         project=args.project, source=args.source,
         git_branch=args.git_branch, git_branch_prefix=args.git_branch_prefix,
+        include_subagents=args.include_subagents,
     )
 
     if not results:
@@ -185,6 +192,8 @@ def cmd_search(args):
         for i, r in enumerate(results, 1):
             score = r.get("score", 0)
             src = r.get("source", "?")
+            if r.get("kind", "main") != "main":
+                src = f"{src}/{r['kind']}"
             sid = r.get("session_id", "?")[:12]
             ts = r.get("timestamp", "")[:19]
             text = r.get("chunk_text", "")[:200].replace("\n", " ")
@@ -274,6 +283,11 @@ def main():
         default=None,
         choices=all_sources(),
         help="Filter by source (claude-code, codex, ...)",
+    )
+    sr.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Also search sub-agent threads (excluded by default)",
     )
     sr.add_argument("--git-branch", default=None, help="Filter by exact git branch")
     sr.add_argument("--git-branch-prefix", default=None, help="Filter by branch prefix, e.g. feature/")

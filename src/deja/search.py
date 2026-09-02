@@ -111,18 +111,20 @@ def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> l
 
 
 def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
-    """Hydrate each result with source + git_branch from chunks."""
+    """Hydrate each result with source + kind + git_branch from chunks."""
     if not results:
         return results
     ids = [r["id"] for r in results]
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, source, git_branch FROM chunks WHERE id IN ({placeholders})", ids
+        f"SELECT id, source, kind, git_branch FROM chunks WHERE id IN ({placeholders})",
+        ids,
     ).fetchall()
-    meta = {row[0]: (row[1], row[2]) for row in rows}
+    meta = {row[0]: (row[1], row[2], row[3]) for row in rows}
     for r in results:
-        src, branch = meta.get(r["id"], ("claude-code", None))
+        src, kind, branch = meta.get(r["id"], ("claude-code", "main", None))
         r["source"] = src
+        r["kind"] = kind
         r["git_branch"] = branch
     return results
 
@@ -131,13 +133,35 @@ def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
 _annotate_source = _annotate_metadata
 
 
+def _index_has_subagents(conn) -> bool:
+    """Whether the index holds sub-agent chunks at all.
+
+    Excluding them only costs recall when they exist, so indexes without
+    sub-agent threads keep the narrow (cheaper) candidate pool.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM chunks WHERE kind = 'subagent' LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
 def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
     source: str = None, git_branch: str = None, git_branch_prefix: str = None,
-    time_decay: bool = False,
+    time_decay: bool = False, include_subagents: bool = False,
 ) -> list[dict]:
-    has_filters = project or date_from or date_to or source or git_branch or git_branch_prefix
+    """Hybrid vector + FTS search over indexed turns.
+
+    include_subagents: sub-agent threads are excluded by default so results
+    stay on the user-facing conversation. They often outnumber main sessions,
+    so excluding them counts as a filter and widens the candidate pool.
+    """
+    excluding_subagents = not include_subagents and _index_has_subagents(conn)
+    has_filters = (
+        project or date_from or date_to or source or git_branch
+        or git_branch_prefix or excluding_subagents
+    )
     k = 100 if has_filters else 20
     vec_results = _vector_search(conn, model, query, k=k)
     fts_results = _fts_search(conn, query, k=k)
@@ -151,6 +175,8 @@ def hybrid_search(
         merged = [r for r in merged if r.get("project_path") == project]
     if source:
         merged = [r for r in merged if r.get("source") == source]
+    if not include_subagents:
+        merged = [r for r in merged if r.get("kind", "main") != "subagent"]
     if git_branch:
         merged = [r for r in merged if r.get("git_branch") == git_branch]
     if git_branch_prefix:

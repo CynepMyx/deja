@@ -58,11 +58,12 @@ mcp = FastMCP("deja", lifespan=lifespan)
 
 def _do_search(conn, model, query, limit=10, project=None, source=None,
                git_branch=None, git_branch_prefix=None,
-               date_from=None, date_to=None):
+               date_from=None, date_to=None, include_subagents=False):
     return hybrid_search(conn, model, query, limit=limit,
                          project=project, source=source,
                          git_branch=git_branch, git_branch_prefix=git_branch_prefix,
-                         date_from=date_from, date_to=date_to)
+                         date_from=date_from, date_to=date_to,
+                         include_subagents=include_subagents)
 
 
 def _do_get_session(conn, session_id):
@@ -117,6 +118,7 @@ async def search(
     git_branch_prefix: str = None,
     date_from: str = None,
     date_to: str = None,
+    include_subagents: bool = False,
     ctx: Context = None,
 ) -> list[dict]:
     """Search past AI agent sessions by meaning. Returns relevant conversation chunks with context.
@@ -124,6 +126,9 @@ async def search(
     source: optional filter, e.g. 'claude-code' or 'codex'.
     git_branch: filter by exact git branch captured at message time (Claude Code only for now).
     git_branch_prefix: filter by branch prefix, e.g. 'feature/' matches feature/*.
+    include_subagents: also search threads a session delegated to a sub-agent.
+      Off by default; turn it on for full recall when the answer likely lives
+      in delegated work (research, generated code, sub-agent-only tool calls).
     """
     lc = ctx.lifespan_context
     lazy_model = lc.get("model")
@@ -133,7 +138,7 @@ async def search(
     model = await asyncio.to_thread(lazy_model.get)
     return await asyncio.to_thread(
         _do_search, db, model, query, limit, project, source,
-        git_branch, git_branch_prefix, date_from, date_to,
+        git_branch, git_branch_prefix, date_from, date_to, include_subagents,
     )
 
 

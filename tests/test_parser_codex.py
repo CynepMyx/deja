@@ -208,8 +208,9 @@ def test_discover_walks_date_tree_and_reads_cwd():
         finally:
             config.CODEX_SESSIONS_DIR = original
 
-        paths = [os.path.basename(p) for p, _ in discovered]
-        cwds = [c for _, c in discovered]
+        paths = [os.path.basename(p) for p, _, _ in discovered]
+        cwds = [c for _, c, _ in discovered]
+        assert {k for _, _, k in discovered} == {"main"}
         assert "rollout-a.jsonl" in paths
         assert "session_index.jsonl" not in paths
         assert "C:\\my\\project" in cwds

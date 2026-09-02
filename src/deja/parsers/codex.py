@@ -12,8 +12,8 @@ TOOL_RESULT_MAX = 2000
 TOOL_ARGS_MAX = 200
 
 
-def discover() -> Iterator[tuple[str, str]]:
-    """Walk ~/.codex/sessions/YYYY/MM/DD/*.jsonl, yield (path, cwd).
+def discover() -> Iterator[tuple[str, str, str]]:
+    """Walk ~/.codex/sessions/YYYY/MM/DD/*.jsonl, yield (path, cwd, kind).
 
     cwd is read from each file's first-line session_meta. We walk the
     filesystem tree directly rather than trusting session_index.jsonl,
@@ -28,7 +28,7 @@ def discover() -> Iterator[tuple[str, str]]:
         if os.path.basename(path) == "session_index.jsonl":
             continue
         cwd = _read_session_cwd(path)
-        yield path, cwd
+        yield path, cwd, "main"
 
 
 def _read_session_cwd(path: str) -> str:
