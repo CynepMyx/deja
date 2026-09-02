@@ -260,3 +260,61 @@ def test_list_subagent_threads_walks_the_link_back():
         assert [t["session_id"] for t in threads] == ["agent-1"]
         assert _do_list_subagents(conn, "agent-1") == []
         conn.close()
+
+
+def test_newer_schema_is_not_stamped_backwards():
+    """A db from a future deja must not be relabelled as ours."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "t.db")
+        conn = init_db(db_path)
+        conn.execute(
+            "INSERT INTO chunks (session_id, message_index, split_index, chunk_text)"
+            " VALUES ('s', 0, 0, 'text')"
+        )
+        conn.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+        conn.commit()
+        conn.close()
+
+        conn = init_db(db_path)
+        # Falls back to the rebuild path rather than silently claiming v5.
+        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        conn.close()
+
+
+def test_vector_search_stops_when_the_index_is_exhausted():
+    with tempfile.TemporaryDirectory() as tmp:
+        from deja.search import _vector_search
+
+        conn = init_db(os.path.join(tmp, "t.db"))
+        model = get_embedding_model()
+        sub = os.path.join(tmp, "agent-only.jsonl")
+        _write_session(sub, "How do I configure nginx?", "proxy_pass")
+        index_file(conn, model, sub, "proj", kind="subagent")
+
+        calls = []
+
+        class _Counting:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *args):
+                calls.append(sql)
+                return self._inner.execute(sql, *args)
+
+        counting = _Counting(conn)
+        assert _vector_search(counting, model, "nginx", k=100, exclude_kind="subagent") == []
+        knn_calls = [c for c in calls if "chunks_vec" in c]
+        assert len(knn_calls) == 1, f"widened past an exhausted index: {len(knn_calls)}"
+        conn.close()
+
+
+def test_schema_guard_survives_an_index_without_a_meta_table():
+    import sqlite3
+    import pytest
+    from deja.cli import _require_current_schema
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = sqlite3.connect(os.path.join(tmp, "empty.db"))
+        with pytest.raises(SystemExit):
+            _require_current_schema(conn)
+        conn.close()

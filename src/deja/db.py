@@ -31,6 +31,12 @@ def _try_additive_migration(conn: sqlite3.Connection, db_version: int) -> bool:
     Returns False without touching the database if any step is missing or
     fails, leaving the caller to fall back to dropping and rebuilding.
     """
+    # A database written by a newer deja cannot be reasoned about here: there
+    # are no steps to apply, and stamping it to our version would hide the
+    # mismatch from every later schema check.
+    if db_version > SCHEMA_VERSION:
+        return False
+
     steps = []
     for version in range(db_version + 1, SCHEMA_VERSION + 1):
         if version not in ADDITIVE_MIGRATIONS:
@@ -39,8 +45,20 @@ def _try_additive_migration(conn: sqlite3.Connection, db_version: int) -> bool:
 
     try:
         conn.execute("SAVEPOINT additive_migration")
+    except sqlite3.Error as e:
+        print(f"[deja] in-place migration unavailable ({e}), rebuilding", file=sys.stderr)
+        return False
+
+    try:
         for statement in steps:
             conn.execute(statement)
+        # Inside the savepoint: a crash between the columns and the version
+        # marker would look like an un-migrated v4 whose ALTERs then fail,
+        # sending the next start into a full rebuild.
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
         conn.execute("RELEASE additive_migration")
     except sqlite3.Error as e:
         conn.execute("ROLLBACK TO additive_migration")
@@ -48,10 +66,6 @@ def _try_additive_migration(conn: sqlite3.Connection, db_version: int) -> bool:
         print(f"[deja] in-place migration failed ({e}), rebuilding", file=sys.stderr)
         return False
 
-    conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
     conn.commit()
     print(
         f"[deja] schema v{db_version} -> v{SCHEMA_VERSION}: "

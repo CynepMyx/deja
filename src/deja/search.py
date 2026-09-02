@@ -26,34 +26,43 @@ def _vector_search(
     query_embedding = list(model.embed([query]))[0]
     blob = serialize_f32(query_embedding.tolist())
 
-    sql = """
-        WITH vec_results AS (
-            SELECT rowid, distance
-            FROM chunks_vec
-            WHERE embedding MATCH ? AND k = ?
-            ORDER BY distance
-        )
-        SELECT c.id, c.session_id, c.message_index, c.timestamp,
-               c.project_path, c.chunk_text, c.tool_result_text,
-               v.distance
-        FROM vec_results v
-        JOIN chunks c ON c.id = v.rowid
-    """
-    params: list = [blob, k]
-    if exclude_kind:
-        sql += " WHERE c.kind != ?"
-        params.append(exclude_kind)
-    sql += " ORDER BY v.distance"
-
     fetch = k
     while True:
-        params[1] = fetch
-        rows = conn.execute(sql, params).fetchall()
-        if not exclude_kind or len(rows) >= k or fetch >= OVERFETCH_MAX:
+        neighbours = conn.execute(
+            """SELECT rowid, distance FROM chunks_vec
+               WHERE embedding MATCH ? AND k = ?
+               ORDER BY distance""",
+            (blob, fetch),
+        ).fetchall()
+        if not neighbours:
+            return []
+
+        order = {rowid: i for i, (rowid, _) in enumerate(neighbours)}
+        distances = dict(neighbours)
+        placeholders = ",".join("?" * len(neighbours))
+        params: list = list(order)
+        kind_clause = ""
+        if exclude_kind:
+            kind_clause = " AND kind != ?"
+            params.append(exclude_kind)
+
+        rows = conn.execute(
+            f"""SELECT id, session_id, message_index, timestamp,
+                       project_path, chunk_text, tool_result_text
+                FROM chunks
+                WHERE id IN ({placeholders}){kind_clause}""",
+            params,
+        ).fetchall()
+
+        # Widening only helps while the KNN still has neighbours to give:
+        # a short result means the index is exhausted, not over-filtered.
+        exhausted = len(neighbours) < fetch
+        if not exclude_kind or len(rows) >= k or exhausted or fetch >= OVERFETCH_MAX:
             break
         fetch = min(fetch * OVERFETCH_FACTOR, OVERFETCH_MAX)
-    rows = rows[:k]
 
+    rows = sorted(rows, key=lambda r: order[r[0]])[:k]
+    rows = [(*r, distances[r[0]]) for r in rows]
     return [
         {
             "id": r[0], "session_id": r[1], "message_index": r[2],
