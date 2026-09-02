@@ -13,14 +13,16 @@ from deja.search import hybrid_search
 from deja.config import get_index_path
 
 
-def _check_schema(conn):
+def _schema_problem(conn) -> str | None:
+    """Describe a schema mismatch, or None when the index is usable."""
     meta = get_meta(conn)
     db_version = int(meta.get("schema_version", "0"))
-    if db_version != SCHEMA_VERSION:
-        raise ToolError(
-            f"Index schema version mismatch: expected {SCHEMA_VERSION}, got {db_version}. "
-            "Run 'deja index --reindex' to rebuild."
-        )
+    if db_version == SCHEMA_VERSION:
+        return None
+    return (
+        f"Index schema v{db_version}, expected v{SCHEMA_VERSION}. "
+        "Run 'deja index' to upgrade it."
+    )
 
 
 class _LazyModel:
@@ -47,9 +49,18 @@ async def lifespan(server):
         return
 
     db = open_db_readonly(index_path)
-    _check_schema(db)
+    problem = _schema_problem(db)
+    if problem:
+        # Failing here would kill the server at startup, and an MCP client
+        # only reports that the connection closed. Stay up and let each tool
+        # answer with something the user can act on.
+        print(f"[deja] {problem}", file=sys.stderr)
+        db.close()
+        yield {"model": None, "db": None, "unavailable": problem}
+        return
+
     print("[deja] ready", file=sys.stderr)
-    yield {"model": _LazyModel(), "db": db}
+    yield {"model": _LazyModel(), "db": db, "unavailable": None}
     db.close()
 
 
@@ -147,7 +158,7 @@ async def search(
     lazy_model = lc.get("model")
     db = lc.get("db")
     if lazy_model is None or db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     model = await asyncio.to_thread(lazy_model.get)
     return await asyncio.to_thread(
         _do_search, db, model, query, limit, project, source,
@@ -161,7 +172,7 @@ async def get_context(chunk_id: int, window: int = 2, ctx: Context = None) -> di
     lc = ctx.lifespan_context
     db = lc.get("db")
     if db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     anchor_id, chunks = await asyncio.to_thread(_do_get_context, db, chunk_id, window)
     if anchor_id is None:
         raise ToolError(f"Chunk {chunk_id} not found in index.")
@@ -178,7 +189,7 @@ async def list_subagent_threads(session_id: str, ctx: Context = None) -> list[di
     lc = ctx.lifespan_context
     db = lc.get("db")
     if db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     return await asyncio.to_thread(_do_list_subagents, db, session_id)
 
 
@@ -188,7 +199,7 @@ async def get_session_chunks(session_id: str, ctx: Context = None) -> list[dict]
     lc = ctx.lifespan_context
     db = lc.get("db")
     if db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     results = await asyncio.to_thread(_do_get_session, db, session_id)
     if not results:
         raise ToolError(f"Session '{session_id}' not found in index.")

@@ -13,6 +13,7 @@
 - **Sub-agent threads link back to the session that spawned them.** `sessions.parent_session_id` is derived from the transcript path, surfaced on every search result, and walkable in the other direction via the new `list_subagent_threads` MCP tool — a delegated finding leads back to the conversation it came from.
 - **`deja analytics` is sub-agent aware.** Delegated threads are separate rows in `sessions`; counting them turned "how many sessions did I have" into "how many threads ran" and let delegated work own the per-session rankings. Excluded by default, `--include-subagents` to opt in.
 - **`deja stats` prints its session count broken down by kind**, so it no longer silently disagrees with `deja analytics` about what counts as a session.
+- **The MCP server survives a stale index.** A schema mismatch was raised inside the lifespan, so the process died at startup and the client only reported that the connection closed. The server now stays up and every tool answers with the version mismatch and the command that fixes it.
 - **`deja stats` and `deja search` report a stale index instead of crashing.** Both opened the database without checking its schema version and died on a missing column; `stats` now keeps printing the rest of its diagnostics and flags the mismatch as an issue.
 
 ### Schema
@@ -25,7 +26,7 @@
 
 ### Tests
 
-- 123 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
+- 125 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
 
 
 ## 0.6.0 (2026-08-24)

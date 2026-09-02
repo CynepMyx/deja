@@ -318,3 +318,40 @@ def test_schema_guard_survives_an_index_without_a_meta_table():
         with pytest.raises(SystemExit):
             _require_current_schema(conn)
         conn.close()
+
+
+def test_stale_index_is_described_not_raised_at_startup():
+    """A schema mismatch must not kill the server: clients only see a closed pipe."""
+    from deja.server import _schema_problem
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = init_db(os.path.join(tmp, "t.db"))
+        assert _schema_problem(conn) is None
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+        problem = _schema_problem(conn)
+        assert problem and "v4" in problem and "deja index" in problem
+        conn.close()
+
+
+def test_gc_removes_a_deleted_subagent_thread():
+    from deja.indexer import gc_orphans
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = init_db(os.path.join(tmp, "t.db"))
+        model = get_embedding_model()
+        main = os.path.join(tmp, "main.jsonl")
+        sub = os.path.join(tmp, "agent-gone.jsonl")
+        _write_session(main, "How do I configure nginx?", "Edit nginx.conf")
+        _write_session(sub, "How do I configure nginx?", "Set proxy_pass")
+        index_file(conn, model, main, "proj", kind="main")
+        index_file(conn, model, sub, "proj", kind="subagent")
+
+        gc_orphans(conn, {main}, sources=["claude-code"])
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE kind = 'subagent'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE kind = 'main'"
+        ).fetchone()[0] > 0
+        conn.close()
