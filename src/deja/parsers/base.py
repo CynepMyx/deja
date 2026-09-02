@@ -15,8 +15,13 @@ class Parser(Protocol):
 
     SOURCE: str
 
-    def discover(self) -> Iterator[tuple[str, str]]:
-        """Yield (file_path, project_path) for every session file on disk."""
+    def discover(self) -> Iterator[tuple[str, str, str]]:
+        """Yield (file_path, project_path, kind) for every session file on disk.
+
+        `kind` is "main" for user-facing sessions and "subagent" for threads
+        a session delegated to a sub-agent. Sources without a sub-agent
+        concept yield "main" for everything.
+        """
         ...
 
     def parse(

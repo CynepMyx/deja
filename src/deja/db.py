@@ -4,7 +4,7 @@ import sys
 
 import sqlite_vec
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
 
@@ -68,6 +68,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             chunk_text TEXT NOT NULL,
             tool_result_text TEXT,
             source TEXT NOT NULL DEFAULT 'claude-code',
+            kind TEXT NOT NULL DEFAULT 'main',
             git_branch TEXT,
             parent_id INTEGER REFERENCES chunks(id),
             UNIQUE(session_id, message_index, split_index)
@@ -85,6 +86,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'main',
             project_path TEXT,
             started_at TEXT,
             ended_at TEXT,
@@ -126,6 +128,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_project_time ON chunks(project_path, timestamp);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+        CREATE INDEX IF NOT EXISTS idx_chunks_kind ON chunks(kind);
         CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(git_branch);
         CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);

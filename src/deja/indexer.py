@@ -58,15 +58,16 @@ def _delete_file_chunks(conn, session_id: str):
     conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (session_id,))
 
 
-def _upsert_session(conn, session_id: str, source: str, project_path: str, turn: dict):
+def _upsert_session(conn, session_id: str, source: str, project_path: str, turn: dict,
+                    kind: str = "main"):
     usage = turn.get("usage") or {}
     ts = turn.get("timestamp", "")
     conn.execute(
         """INSERT INTO sessions (
-              session_id, source, project_path, started_at, ended_at, turn_count,
+              session_id, source, kind, project_path, started_at, ended_at, turn_count,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
            )
-           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
            ON CONFLICT(session_id) DO UPDATE SET
               project_path = COALESCE(sessions.project_path, excluded.project_path),
               started_at = CASE
@@ -82,7 +83,7 @@ def _upsert_session(conn, session_id: str, source: str, project_path: str, turn:
               cache_read_tokens = sessions.cache_read_tokens + excluded.cache_read_tokens
         """,
         (
-            session_id, source, project_path, ts, ts,
+            session_id, source, kind, project_path, ts, ts,
             int(usage.get("input_tokens", 0) or 0),
             int(usage.get("output_tokens", 0) or 0),
             int(usage.get("cache_creation_tokens", 0) or 0),
@@ -145,6 +146,7 @@ def index_file(
     path: str,
     project_path: str,
     source: str = "claude-code",
+    kind: str = "main",
 ):
     session_id = os.path.splitext(os.path.basename(path))[0]
     needs = check_needs_reindex(conn, path)
@@ -169,9 +171,11 @@ def index_file(
     for batch_turns in _iter_batches(turns_gen, TURNS_PER_BATCH):
         chunks = []
         for turn in batch_turns:
-            chunks.extend(make_chunks(turn, session_id, project_path, source=source))
+            chunks.extend(
+                make_chunks(turn, session_id, project_path, source=source, kind=kind)
+            )
             if not turn.get("provisional"):
-                _upsert_session(conn, session_id, source, project_path, turn)
+                _upsert_session(conn, session_id, source, project_path, turn, kind=kind)
                 _upsert_tool_calls(conn, session_id, turn.get("tool_names") or [])
 
         if not chunks:
@@ -212,16 +216,17 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     ).fetchone()
 
     source = chunk.get("source", "claude-code")
+    kind = chunk.get("kind", "main")
     git_branch = chunk.get("git_branch")
     if row:
         chunk_id = row[0]
         conn.execute(
             """UPDATE chunks SET timestamp = ?, project_path = ?,
-               chunk_text = ?, tool_result_text = ?, source = ?, git_branch = ?
+               chunk_text = ?, tool_result_text = ?, source = ?, kind = ?, git_branch = ?
                WHERE id = ?""",
             (chunk["timestamp"], chunk["project_path"],
              chunk["chunk_text"], chunk.get("tool_result_text", ""),
-             source, git_branch, chunk_id),
+             source, kind, git_branch, chunk_id),
         )
         conn.execute(
             "INSERT OR REPLACE INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
@@ -234,11 +239,11 @@ def _upsert_chunk(conn, chunk: dict, embedding):
     else:
         cursor = conn.execute(
             """INSERT INTO chunks
-            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source, git_branch)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, message_index, split_index, timestamp, project_path, chunk_text, tool_result_text, source, kind, git_branch)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (chunk["session_id"], chunk["message_index"], chunk["split_index"],
              chunk["timestamp"], chunk["project_path"], chunk["chunk_text"],
-             chunk.get("tool_result_text", ""), source, git_branch),
+             chunk.get("tool_result_text", ""), source, kind, git_branch),
         )
         chunk_id = cursor.lastrowid
         conn.execute(
