@@ -14,24 +14,51 @@ def fts5_escape(query: str) -> str:
     escaped = ['"' + t.replace('"', '""') + '"' for t in tokens]
     return " AND ".join(escaped)
 
-def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
+# vec0 cannot filter on a metadata column: the KNN picks its neighbours over
+# every chunk, and an excluded kind can eat all of them. Over-fetch and widen
+# until enough rows survive the join, bounded by the corpus itself.
+OVERFETCH_FACTOR = 4
+OVERFETCH_MAX = 2000
+
+_VEC_SQL = """
+    WITH vec_results AS (
+        SELECT rowid, distance
+        FROM chunks_vec
+        WHERE embedding MATCH ? AND k = ?
+        ORDER BY distance
+    )
+    SELECT c.id, c.session_id, c.message_index, c.timestamp,
+           c.project_path, c.chunk_text, c.tool_result_text,
+           v.distance
+    FROM vec_results v
+    JOIN chunks c ON c.id = v.rowid
+    {kind_clause}
+    ORDER BY v.distance
+    LIMIT ?
+"""
+
+
+def _vector_search(
+    conn, model, query: str, k: int = 20, exclude_kind: str = None
+) -> list[dict]:
     query_embedding = list(model.embed([query]))[0]
-    rows = conn.execute(
-        """
-        WITH vec_results AS (
-            SELECT rowid, distance
-            FROM chunks_vec
-            WHERE embedding MATCH ? AND k = ?
-            ORDER BY distance
-        )
-        SELECT c.id, c.session_id, c.message_index, c.timestamp,
-               c.project_path, c.chunk_text, c.tool_result_text,
-               v.distance
-        FROM vec_results v
-        JOIN chunks c ON c.id = v.rowid
-        """,
-        (serialize_f32(query_embedding.tolist()), k),
-    ).fetchall()
+    blob = serialize_f32(query_embedding.tolist())
+    sql = _VEC_SQL.format(kind_clause="WHERE c.kind != ?" if exclude_kind else "")
+
+    if exclude_kind:
+        # Widening past the corpus only repeats the same full scan.
+        corpus = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        cap = min(OVERFETCH_MAX, max(corpus, k))
+    else:
+        cap = k
+
+    fetch = k
+    while True:
+        params = [blob, fetch, exclude_kind, k] if exclude_kind else [blob, fetch, k]
+        rows = conn.execute(sql, params).fetchall()
+        if len(rows) >= k or fetch >= cap:
+            break
+        fetch = min(fetch * OVERFETCH_FACTOR, cap)
 
     return [
         {
@@ -42,21 +69,23 @@ def _vector_search(conn, model, query: str, k: int = 20) -> list[dict]:
         for r in rows
     ]
 
-def _fts_search(conn, query: str, k: int = 20) -> list[dict]:
+def _fts_search(conn, query: str, k: int = 20, exclude_kind: str = None) -> list[dict]:
     escaped = fts5_escape(query)
+    kind_clause = "AND c.kind != ?" if exclude_kind else ""
+    params = [escaped, exclude_kind, k] if exclude_kind else [escaped, k]
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT c.id, c.session_id, c.message_index, c.timestamp,
                    c.project_path, c.chunk_text, c.tool_result_text,
                    rank
             FROM chunks_fts f
             JOIN chunks c ON c.id = f.rowid
-            WHERE chunks_fts MATCH ?
+            WHERE chunks_fts MATCH ? {kind_clause}
             ORDER BY rank
             LIMIT ?
             """,
-            (escaped, k),
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -111,19 +140,27 @@ def _apply_time_decay(results: list[dict], alpha: float = TIME_DECAY_ALPHA) -> l
 
 
 def _annotate_metadata(conn, results: list[dict]) -> list[dict]:
-    """Hydrate each result with source + git_branch from chunks."""
+    """Hydrate each result with source, kind, git_branch and parent session."""
     if not results:
         return results
     ids = [r["id"] for r in results]
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, source, git_branch FROM chunks WHERE id IN ({placeholders})", ids
+        f"""SELECT c.id, c.source, c.kind, c.git_branch, s.parent_session_id
+            FROM chunks c
+            LEFT JOIN sessions s ON s.session_id = c.session_id
+            WHERE c.id IN ({placeholders})""",
+        ids,
     ).fetchall()
-    meta = {row[0]: (row[1], row[2]) for row in rows}
+    meta = {row[0]: (row[1], row[2], row[3], row[4]) for row in rows}
     for r in results:
-        src, branch = meta.get(r["id"], ("claude-code", None))
+        src, kind, branch, parent = meta.get(
+            r["id"], ("claude-code", "main", None, None)
+        )
         r["source"] = src
+        r["kind"] = kind
         r["git_branch"] = branch
+        r["parent_session_id"] = parent
     return results
 
 
@@ -135,12 +172,23 @@ def hybrid_search(
     conn, model, query: str, limit: int = 10,
     project: str = None, date_from: str = None, date_to: str = None,
     source: str = None, git_branch: str = None, git_branch_prefix: str = None,
-    time_decay: bool = False,
+    time_decay: bool = False, include_subagents: bool = False,
 ) -> list[dict]:
-    has_filters = project or date_from or date_to or source or git_branch or git_branch_prefix
+    """Hybrid vector + FTS search over indexed turns.
+
+    include_subagents: sub-agent threads are excluded by default so results
+    stay on the user-facing conversation. The exclusion is pushed into both
+    retrieval lanes rather than applied afterwards — sub-agent threads can
+    outnumber main ones several times over, and a post-filter would let them
+    consume every candidate slot before the merge.
+    """
+    has_filters = (
+        project or date_from or date_to or source or git_branch or git_branch_prefix
+    )
     k = 100 if has_filters else 20
-    vec_results = _vector_search(conn, model, query, k=k)
-    fts_results = _fts_search(conn, query, k=k)
+    exclude_kind = None if include_subagents else "subagent"
+    vec_results = _vector_search(conn, model, query, k=k, exclude_kind=exclude_kind)
+    fts_results = _fts_search(conn, query, k=k, exclude_kind=exclude_kind)
     merged = _rrf_merge(vec_results, fts_results)
     merged = _annotate_metadata(conn, merged)
 

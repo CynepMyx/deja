@@ -79,14 +79,14 @@ def _read_header(path: str) -> tuple[str, str]:
     return timestamp, encode_project_path(cwd)
 
 
-def discover() -> Iterator[tuple[str, str]]:
-    """Yield (path, project_path) for every extract in ~/.claude/reviews/sessions."""
+def discover() -> Iterator[tuple[str, str, str]]:
+    """Yield (path, project_path, kind) for every extract in ~/.claude/reviews/sessions."""
     if not os.path.isdir(REVIEW_SESSIONS_DIR):
         return
 
     for path in sorted(glob.glob(os.path.join(REVIEW_SESSIONS_DIR, "*.md"))):
         _, project_path = _read_header(path)
-        yield path, project_path
+        yield path, project_path, "main"
 
 
 def _byte_offsets(lines: list[str]) -> list[int]:

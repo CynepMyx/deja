@@ -4,18 +4,83 @@ import sys
 
 import sqlite_vec
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
 
 def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
 
-def _migrate_if_needed(conn: sqlite3.Connection):
-    """Drop index tables when the on-disk schema version differs.
+# Version -> statements that upgrade the previous version in place. A version
+# listed here adds columns only, so the existing rows and — crucially — the
+# existing embeddings survive. Anything not listed falls back to a rebuild.
+ADDITIVE_MIGRATIONS = {
+    # Sub-agent threads were not indexed before v5, so every existing row is
+    # correctly a 'main' row and the column default needs no backfill.
+    5: [
+        "ALTER TABLE chunks ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
+        "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'main'",
+        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+    ],
+}
 
-    Tables are recreated by init_db right after; data is rebuilt by the
-    next `deja index`. Must run before any DDL that references new columns.
+
+def _try_additive_migration(conn: sqlite3.Connection, db_version: int) -> bool:
+    """Upgrade in place if every step from db_version to HEAD is additive.
+
+    Returns False without touching the database if any step is missing or
+    fails, leaving the caller to fall back to dropping and rebuilding.
+    """
+    # A database written by a newer deja cannot be reasoned about here: there
+    # are no steps to apply, and stamping it to our version would hide the
+    # mismatch from every later schema check.
+    if db_version > SCHEMA_VERSION:
+        return False
+
+    steps = []
+    for version in range(db_version + 1, SCHEMA_VERSION + 1):
+        if version not in ADDITIVE_MIGRATIONS:
+            return False
+        steps.extend(ADDITIVE_MIGRATIONS[version])
+
+    try:
+        conn.execute("SAVEPOINT additive_migration")
+    except sqlite3.Error as e:
+        print(f"[deja] in-place migration unavailable ({e}), rebuilding", file=sys.stderr)
+        return False
+
+    try:
+        for statement in steps:
+            conn.execute(statement)
+        # Inside the savepoint: a crash between the columns and the version
+        # marker would look like an un-migrated v4 whose ALTERs then fail,
+        # sending the next start into a full rebuild.
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.execute("RELEASE additive_migration")
+    except sqlite3.Error as e:
+        conn.execute("ROLLBACK TO additive_migration")
+        conn.execute("RELEASE additive_migration")
+        print(f"[deja] in-place migration failed ({e}), rebuilding", file=sys.stderr)
+        return False
+
+    conn.commit()
+    print(
+        f"[deja] schema v{db_version} -> v{SCHEMA_VERSION}: "
+        "migrated in place, embeddings kept",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _migrate_if_needed(conn: sqlite3.Connection):
+    """Bring the on-disk schema to SCHEMA_VERSION.
+
+    Additive upgrades are applied in place. Anything else drops the index
+    tables — recreated by init_db right after, repopulated by the next
+    `deja index`. Must run before any DDL that references new columns.
     """
     has_meta = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -25,6 +90,9 @@ def _migrate_if_needed(conn: sqlite3.Connection):
 
     db_version = int(get_meta(conn).get("schema_version", "0"))
     if db_version == SCHEMA_VERSION:
+        return
+
+    if _try_additive_migration(conn, db_version):
         return
 
     print(
@@ -68,6 +136,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             chunk_text TEXT NOT NULL,
             tool_result_text TEXT,
             source TEXT NOT NULL DEFAULT 'claude-code',
+            kind TEXT NOT NULL DEFAULT 'main',
             git_branch TEXT,
             parent_id INTEGER REFERENCES chunks(id),
             UNIQUE(session_id, message_index, split_index)
@@ -85,6 +154,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'main',
+            parent_session_id TEXT,
             project_path TEXT,
             started_at TEXT,
             ended_at TEXT,
@@ -126,8 +197,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_project_time ON chunks(project_path, timestamp);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+        CREATE INDEX IF NOT EXISTS idx_chunks_kind ON chunks(kind);
         CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(git_branch);
         CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
     """)

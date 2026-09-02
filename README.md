@@ -15,6 +15,7 @@
 | Source | Path | Status |
 |--------|------|--------|
 | Claude Code | `~/.claude/projects/*/*.jsonl` | Supported |
+| Claude Code sub-agents | `~/.claude/projects/*/*/subagents/*.jsonl` | Supported (v0.7+) |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Supported (v0.4+) |
 | Cursor / Gemini / OpenCode | — | Planned ([#8](https://github.com/CynepMyx/deja/issues/8)) |
 
@@ -65,6 +66,26 @@ deja index --source codex        # only Codex CLI sessions
 
 Scans every supported source by default. Filter with `--source`.
 
+### Sub-agent threads
+
+Claude Code writes a separate transcript for every thread a session delegates
+to a sub-agent, under `<project>/<session-id>/subagents/`. These are indexed
+and tagged `kind = "subagent"`, but kept out of search results by default so
+a query answers from the conversation the user actually had. Opt in for full
+recall — delegated research, generated code, sub-agent-only tool calls:
+
+```bash
+deja search "milvus schema" --include-subagents
+deja stats                        # chunk counts broken down by kind
+```
+
+Each thread records the session that spawned it. A sub-agent hit carries
+`parent_session_id`, and `list_subagent_threads` walks the same link the
+other way, so a delegated finding never dead-ends.
+
+`deja analytics` counts only user-facing sessions for the same reason;
+pass `--include-subagents` to count delegated threads as well.
+
 ### Add to Claude Code
 
 Add to `~/.claude.json` under `mcpServers`:
@@ -89,12 +110,14 @@ Restart Claude Code — deja will appear as a connected MCP server.
 | `search` | Hybrid semantic + keyword search across all sessions |
 | `get_context` | Get a chunk with surrounding turns (±window) |
 | `get_session_chunks` | Get indexed chunks for a session (not raw messages) |
+| `list_subagent_threads` | List the sub-agent threads a session delegated work to |
 
 **search** parameters:
 - `query` (string) — what to search for
 - `limit` (int, default 10) — max results
 - `project` (string, optional) — filter by project
 - `source` (string, optional) — filter by source: `claude-code`, `codex`
+- `include_subagents` (bool, default false) — also search sub-agent threads
 - `date_from` / `date_to` (string, optional) — ISO date range
 
 ### Auto-indexing (optional)

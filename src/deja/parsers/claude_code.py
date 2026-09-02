@@ -9,10 +9,22 @@ from deja.secrets import redact_turn
 
 SOURCE = "claude-code"
 TOOL_RESULT_MAX = 2000
+SUBAGENT_DIRNAME = "subagents"
+KIND_MAIN = "main"
+KIND_SUBAGENT = "subagent"
 
 
-def discover() -> Iterator[tuple[str, str]]:
-    """Walk ~/.claude/projects/<project>/*.jsonl, yield (path, project_dir)."""
+def discover() -> Iterator[tuple[str, str, str]]:
+    """Walk ~/.claude/projects, yield (path, project_dir, kind).
+
+    Two layouts live side by side:
+      <project>/<session-id>.jsonl                        -> kind "main"
+      <project>/<session-id>/subagents/agent-*.jsonl      -> kind "subagent"
+
+    Sub-agent threads carry work the main transcript never sees (delegated
+    research, generated code, tool output), so they are indexed too and kept
+    addressable via the `kind` column.
+    """
     if not os.path.isdir(CLAUDE_PROJECTS_DIR):
         print(f"[deja] {CLAUDE_PROJECTS_DIR} not found", file=sys.stderr)
         return
@@ -22,7 +34,25 @@ def discover() -> Iterator[tuple[str, str]]:
         if not os.path.isdir(full_project):
             continue
         for jsonl in glob.glob(os.path.join(full_project, "*.jsonl")):
-            yield jsonl, project_dir
+            yield jsonl, project_dir, KIND_MAIN
+        for jsonl in glob.glob(
+            os.path.join(full_project, "*", SUBAGENT_DIRNAME, "*.jsonl")
+        ):
+            yield jsonl, project_dir, KIND_SUBAGENT
+
+def parent_session_id(path: str) -> str | None:
+    """Session that spawned a sub-agent thread, read from its path.
+
+    `<project>/<session-id>/subagents/agent-*.jsonl` -> `<session-id>`.
+    Returns None for a main transcript.
+    """
+    subagents_dir, filename = os.path.split(path)
+    session_dir, dirname = os.path.split(subagents_dir)
+    if dirname != SUBAGENT_DIRNAME:
+        return None
+    parent = os.path.basename(session_dir)
+    return parent or None
+
 
 def extract_content(content) -> tuple[str, str, list[str]]:
     """Returns (text, tool_result, tool_names_used)."""

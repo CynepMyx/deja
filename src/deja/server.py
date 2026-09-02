@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import sys
 import threading
 from contextlib import asynccontextmanager
@@ -13,14 +14,21 @@ from deja.search import hybrid_search
 from deja.config import get_index_path
 
 
-def _check_schema(conn):
-    meta = get_meta(conn)
+def _schema_problem(conn) -> str | None:
+    """Describe a schema mismatch, or None when the index is usable."""
+    try:
+        meta = get_meta(conn)
+    except sqlite3.OperationalError:
+        # An index file can exist without a schema: zero-byte, half-copied,
+        # or an interrupted first run. Reads as version 0, same as the CLI.
+        meta = {}
     db_version = int(meta.get("schema_version", "0"))
-    if db_version != SCHEMA_VERSION:
-        raise ToolError(
-            f"Index schema version mismatch: expected {SCHEMA_VERSION}, got {db_version}. "
-            "Run 'deja index --reindex' to rebuild."
-        )
+    if db_version == SCHEMA_VERSION:
+        return None
+    return (
+        f"Index schema v{db_version}, expected v{SCHEMA_VERSION}. "
+        "Run 'deja index' to upgrade it."
+    )
 
 
 class _LazyModel:
@@ -46,10 +54,29 @@ async def lifespan(server):
         yield {"model": None, "db": None}
         return
 
-    db = open_db_readonly(index_path)
-    _check_schema(db)
+    try:
+        db = open_db_readonly(index_path)
+        problem = _schema_problem(db)
+    except sqlite3.DatabaseError as e:
+        print(f"[deja] cannot open index at {index_path}: {e}", file=sys.stderr)
+        yield {
+            "model": None, "db": None,
+            "unavailable": f"Index at {index_path} is unreadable ({e}). "
+                           "Run 'deja index' to rebuild it.",
+        }
+        return
+
+    if problem:
+        # Failing here would kill the server at startup, and an MCP client
+        # only reports that the connection closed. Stay up and let each tool
+        # answer with something the user can act on.
+        print(f"[deja] {problem}", file=sys.stderr)
+        db.close()
+        yield {"model": None, "db": None, "unavailable": problem}
+        return
+
     print("[deja] ready", file=sys.stderr)
-    yield {"model": _LazyModel(), "db": db}
+    yield {"model": _LazyModel(), "db": db, "unavailable": None}
     db.close()
 
 
@@ -58,11 +85,12 @@ mcp = FastMCP("deja", lifespan=lifespan)
 
 def _do_search(conn, model, query, limit=10, project=None, source=None,
                git_branch=None, git_branch_prefix=None,
-               date_from=None, date_to=None):
+               date_from=None, date_to=None, include_subagents=False):
     return hybrid_search(conn, model, query, limit=limit,
                          project=project, source=source,
                          git_branch=git_branch, git_branch_prefix=git_branch_prefix,
-                         date_from=date_from, date_to=date_to)
+                         date_from=date_from, date_to=date_to,
+                         include_subagents=include_subagents)
 
 
 def _do_get_session(conn, session_id):
@@ -73,6 +101,19 @@ def _do_get_session(conn, session_id):
     ).fetchall()
     return [
         {"chunk_text": r[0], "message_index": r[1], "timestamp": r[2], "project_path": r[3]}
+        for r in rows
+    ]
+
+
+def _do_list_subagents(conn, session_id):
+    rows = conn.execute(
+        """SELECT session_id, started_at, ended_at, turn_count
+           FROM sessions WHERE parent_session_id = ?
+           ORDER BY started_at""",
+        (session_id,),
+    ).fetchall()
+    return [
+        {"session_id": r[0], "started_at": r[1], "ended_at": r[2], "turn_count": r[3]}
         for r in rows
     ]
 
@@ -117,6 +158,7 @@ async def search(
     git_branch_prefix: str = None,
     date_from: str = None,
     date_to: str = None,
+    include_subagents: bool = False,
     ctx: Context = None,
 ) -> list[dict]:
     """Search past AI agent sessions by meaning. Returns relevant conversation chunks with context.
@@ -124,16 +166,19 @@ async def search(
     source: optional filter, e.g. 'claude-code' or 'codex'.
     git_branch: filter by exact git branch captured at message time (Claude Code only for now).
     git_branch_prefix: filter by branch prefix, e.g. 'feature/' matches feature/*.
+    include_subagents: also search threads a session delegated to a sub-agent.
+      Off by default; turn it on for full recall when the answer likely lives
+      in delegated work (research, generated code, sub-agent-only tool calls).
     """
     lc = ctx.lifespan_context
     lazy_model = lc.get("model")
     db = lc.get("db")
     if lazy_model is None or db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     model = await asyncio.to_thread(lazy_model.get)
     return await asyncio.to_thread(
         _do_search, db, model, query, limit, project, source,
-        git_branch, git_branch_prefix, date_from, date_to,
+        git_branch, git_branch_prefix, date_from, date_to, include_subagents,
     )
 
 
@@ -143,11 +188,25 @@ async def get_context(chunk_id: int, window: int = 2, ctx: Context = None) -> di
     lc = ctx.lifespan_context
     db = lc.get("db")
     if db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     anchor_id, chunks = await asyncio.to_thread(_do_get_context, db, chunk_id, window)
     if anchor_id is None:
         raise ToolError(f"Chunk {chunk_id} not found in index.")
     return {"anchor_id": anchor_id, "chunks": chunks}
+
+
+@mcp.tool()
+async def list_subagent_threads(session_id: str, ctx: Context = None) -> list[dict]:
+    """List the sub-agent threads a session delegated work to.
+
+    Pair with a `search` hit: a result whose kind is 'subagent' carries the
+    parent in `parent_session_id`, and this walks the same link the other way.
+    """
+    lc = ctx.lifespan_context
+    db = lc.get("db")
+    if db is None:
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
+    return await asyncio.to_thread(_do_list_subagents, db, session_id)
 
 
 @mcp.tool()
@@ -156,7 +215,7 @@ async def get_session_chunks(session_id: str, ctx: Context = None) -> list[dict]
     lc = ctx.lifespan_context
     db = lc.get("db")
     if db is None:
-        raise ToolError("Index not loaded. Run 'deja index' first.")
+        raise ToolError(lc.get("unavailable") or "Index not loaded. Run 'deja index' first.")
     results = await asyncio.to_thread(_do_get_session, db, session_id)
     if not results:
         raise ToolError(f"Session '{session_id}' not found in index.")

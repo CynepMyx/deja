@@ -28,7 +28,8 @@ def _split_text(text: str) -> list[str]:
     return chunks
 
 def make_chunks(
-    turn: dict, session_id: str, project_path: str, source: str = "claude-code"
+    turn: dict, session_id: str, project_path: str, source: str = "claude-code",
+    kind: str = "main",
 ) -> list[dict]:
     embed_text = f"{turn['user_text']}\n\n{turn['assistant_text']}"
     parts = _split_text(embed_text)
@@ -43,6 +44,7 @@ def make_chunks(
             "timestamp": turn.get("timestamp", ""),
             "project_path": project_path,
             "source": source,
+            "kind": kind,
             "git_branch": turn.get("git_branch"),
         }
         for i, part in enumerate(parts)
