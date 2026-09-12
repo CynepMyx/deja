@@ -3,26 +3,51 @@ import sys
 from itertools import islice
 from fastembed import TextEmbedding
 from fastembed.text.text_embedding import PoolingType, ModelSource
-from deja.db import serialize_f32
+from deja.db import serialize_f32, EMBEDDING_DIM, EMBEDDING_MODEL
 from deja.parsers.registry import get_parser
 from deja.chunker import make_chunks
 
-EMBED_BATCH_SIZE = 32
+# 32 keeps a laptop responsive while indexing in the background. A bulk
+# rebuild on a GPU wants far more per call, hence the override.
+EMBED_BATCH_SIZE = int(os.environ.get("DEJA_EMBED_BATCH", "32"))
 TURNS_PER_BATCH = 50
+
+
+def _embedding_runtime() -> dict:
+    """How fastembed should execute, from the environment.
+
+    Empty by default, i.e. fastembed's own CPU behaviour. The GPU path needs
+    `fastembed-gpu` installed alongside a matching CUDA runtime, so it is
+    opt-in rather than detected: silently falling back to CPU on a machine
+    where the caller asked for a GPU would turn a two-hour rebuild into a
+    two-day one with nothing in the log to say why.
+    """
+    opts: dict = {}
+    providers = os.environ.get("DEJA_EMBED_PROVIDERS")
+    if providers:
+        opts["providers"] = [p.strip() for p in providers.split(",") if p.strip()]
+    device_ids = os.environ.get("DEJA_EMBED_DEVICE_IDS")
+    if device_ids:
+        opts["device_ids"] = [int(d) for d in device_ids.split(",") if d.strip()]
+    threads = os.environ.get("DEJA_EMBED_THREADS")
+    if threads:
+        opts["threads"] = int(threads)
+    return opts
+
 
 def get_embedding_model() -> TextEmbedding:
     try:
         TextEmbedding.add_custom_model(
-            model="intfloat/multilingual-e5-small",
+            model=EMBEDDING_MODEL,
             pooling=PoolingType.MEAN,
             normalization=True,
-            sources=ModelSource(hf="intfloat/multilingual-e5-small"),
-            dim=384,
+            sources=ModelSource(hf=EMBEDDING_MODEL),
+            dim=EMBEDDING_DIM,
             model_file="onnx/model.onnx",
         )
     except ValueError:
         pass  # already registered
-    return TextEmbedding(model_name="intfloat/multilingual-e5-small")
+    return TextEmbedding(model_name=EMBEDDING_MODEL, **_embedding_runtime())
 
 def check_needs_reindex(conn, path: str) -> bool | str:
     row = conn.execute(
