@@ -4,7 +4,15 @@ import tempfile
 
 import sqlite_vec
 
-from deja.db import init_db, get_meta, SCHEMA_VERSION
+from deja.db import (
+    init_db,
+    get_meta,
+    index_identity,
+    read_identity,
+    stale_identity,
+    writer_version,
+    SCHEMA_VERSION,
+)
 
 def test_init_db_creates_tables():
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,3 +123,63 @@ def test_init_db_idempotent_on_current_schema():
         conn = init_db(db_path)
         assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
         conn.close()
+
+def test_identity_markers_are_stamped_on_every_open():
+    """The marker must describe the build that last wrote, not the first one.
+
+    With INSERT OR IGNORE an index kept the version of whichever build created
+    the file. That is how a live index came to claim a schema version it never
+    had while its rows had been written by a different parser entirely.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('parser_version', '1')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = init_db(db_path)
+        assert get_meta(conn)["parser_version"] == index_identity()["parser_version"]
+        assert get_meta(conn)["writer_version"] == writer_version()
+        conn.close()
+
+
+def test_read_identity_does_not_create_or_migrate():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        assert read_identity(db_path) == {}
+        assert not os.path.exists(db_path)
+
+        conn = init_db(db_path)
+        conn.close()
+        stored = read_identity(db_path)
+        assert stored["schema_version"] == str(SCHEMA_VERSION)
+        assert stored["writer_version"] == writer_version()
+
+
+def test_read_identity_survives_a_half_written_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        open(db_path, "wb").close()
+        assert read_identity(db_path) == {}
+
+
+def test_stale_identity_flags_a_foreign_writer_but_not_a_new_release():
+    current = index_identity()
+
+    assert stale_identity(current) == []
+
+    other_release = dict(current, writer_version="99.0.0")
+    assert stale_identity(other_release) == [], (
+        "a release that changes nothing about stored rows must not cost a rebuild"
+    )
+
+    other_parser = dict(current, parser_version="1")
+    assert stale_identity(other_parser) == ["parser_version"]
+
+    other_model = dict(current, embedding_model="BAAI/bge-m3", embedding_dim="1024")
+    assert set(stale_identity(other_model)) == {"embedding_model", "embedding_dim"}
+
+    assert "schema_version" in stale_identity({})

@@ -7,7 +7,13 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from deja.db import init_db, get_meta, SCHEMA_VERSION
+from deja.db import (
+    init_db,
+    index_identity,
+    read_identity,
+    stale_identity,
+    SCHEMA_VERSION,
+)
 from deja.indexer import get_embedding_model, index_file, gc_orphans
 from deja.config import get_index_dir, get_index_path
 from deja.parsers.registry import all_sources, get_parser
@@ -53,11 +59,26 @@ def cmd_index(args):
         index_dir = get_index_dir()
         index_path = get_index_path()
         os.makedirs(index_dir, exist_ok=True)
+
+        # Before init_db, which migrates the schema and re-stamps every marker.
+        stored = read_identity(index_path)
+        stale = stale_identity(stored) if stored else []
+
         conn = init_db(index_path)
 
-        meta = get_meta(conn)
-        if args.reindex or int(meta.get("schema_version", "0")) != SCHEMA_VERSION:
-            print("[deja] full reindex requested", file=sys.stderr)
+        if args.reindex or stale:
+            if stale:
+                current = index_identity()
+                changed = ", ".join(
+                    f"{key} {stored.get(key, 'unset')} -> {current[key]}" for key in stale
+                )
+                print(
+                    "[deja] full reindex: this index was written by another build"
+                    f" ({changed})",
+                    file=sys.stderr,
+                )
+            else:
+                print("[deja] full reindex requested", file=sys.stderr)
             conn.execute("DELETE FROM chunks")
             conn.execute("DELETE FROM chunks_vec")
             conn.execute("DELETE FROM chunks_fts")
@@ -117,6 +138,11 @@ def cmd_stats():
 
     # Consistency check
     issues = []
+    for key in stale_identity(meta):
+        issues.append(
+            f"{key} {meta.get(key, 'unset')}, expected {index_identity()[key]}"
+            " - run 'deja index'"
+        )
     if chunks != vectors:
         issues.append(f"chunks ({chunks}) != vectors ({vectors})")
     if chunks != fts:
@@ -137,6 +163,8 @@ def cmd_stats():
     print(f"Model:      {meta.get('embedding_model', '?')}")
     print(f"Dim:        {meta.get('embedding_dim', '?')}")
     print(f"Schema:     v{meta.get('schema_version', '?')}")
+    print(f"Written by: deja {meta.get('writer_version', '?')}"
+          f", parser v{meta.get('parser_version', '?')}")
     print(f"DB size:    {db_size:.1f} MB")
     print(f"DB path:    {index_path}")
     print(f"Last index: {db_mtime}")

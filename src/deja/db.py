@@ -1,3 +1,5 @@
+import importlib.metadata
+import os
 import sqlite3
 import struct
 import sys
@@ -7,6 +9,69 @@ import sqlite_vec
 SCHEMA_VERSION = 4
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
+
+# Markers that describe what produced the rows in an index. Everything in
+# REBUILD_KEYS invalidates existing chunks or embeddings when it changes, so a
+# mismatch makes `deja index` rebuild rather than resume. `writer_version` is
+# recorded but does not trigger a rebuild on its own: most releases change
+# nothing about what is stored, and a two-hour reindex per patch release is a
+# guard people switch off.
+REBUILD_KEYS = ("schema_version", "parser_version", "embedding_model", "embedding_dim")
+
+
+def writer_version() -> str:
+    """Version of the deja build writing this index.
+
+    Read from installed package metadata rather than a hand-kept constant:
+    `deja/__init__.py` and `pyproject.toml` have already drifted apart once,
+    and a provenance marker that can lie is worse than no marker at all.
+    """
+    try:
+        return importlib.metadata.version("dejasearch")
+    except importlib.metadata.PackageNotFoundError:
+        return "0+source"
+
+
+def index_identity() -> dict:
+    """The markers this build would stamp into an index."""
+    from deja.parsers.registry import PARSER_VERSION
+
+    return {
+        "schema_version": str(SCHEMA_VERSION),
+        "parser_version": str(PARSER_VERSION),
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_dim": str(EMBEDDING_DIM),
+        "writer_version": writer_version(),
+    }
+
+
+def read_identity(db_path: str) -> dict:
+    """Markers stored in an index, read without creating or migrating it.
+
+    `init_db` migrates and re-stamps, so anything that wants to compare the
+    stored markers against this build has to read them first — otherwise the
+    comparison can only ever agree with itself.
+    """
+    if not os.path.exists(db_path):
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.DatabaseError:
+        return {}
+    try:
+        return dict(conn.execute("SELECT key, value FROM meta").fetchall())
+    except sqlite3.OperationalError:
+        # No meta table: zero-byte, half-copied, or an interrupted first run.
+        return {}
+    finally:
+        conn.close()
+
+
+def stale_identity(stored: dict) -> list[str]:
+    """Rebuild-triggering markers on which a stored index disagrees with us."""
+    current = index_identity()
+    return [key for key in REBUILD_KEYS if stored.get(key) != current[key]]
+
 
 def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
@@ -132,15 +197,13 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
     """)
 
-    meta_defaults = {
-        "schema_version": str(SCHEMA_VERSION),
-        "embedding_model": EMBEDDING_MODEL,
-        "embedding_dim": str(EMBEDDING_DIM),
-        "parser_version": "1",
-    }
-    for key, value in meta_defaults.items():
+    # Re-stamped on every open, not inserted once. With INSERT OR IGNORE the
+    # marker described whichever build first created the file and nothing
+    # after it, which is how an index came to claim a schema version it had
+    # never had while its rows were written by an entirely different parser.
+    for key, value in index_identity().items():
         conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             (key, value),
         )
 
