@@ -13,6 +13,26 @@ EMBED_BATCH_SIZE = int(os.environ.get("DEJA_EMBED_BATCH", "32"))
 TURNS_PER_BATCH = 50
 
 
+# Chunks vary in length, so every batch is a new input shape. CUDA's default
+# arena answers that by extending in ever larger blocks and eventually fails to
+# find a contiguous one — surfacing as a failed allocation for a buffer far
+# smaller than the card's free memory, tens of thousands of chunks into a run.
+# Requesting exactly what is needed trades a little speed for a rebuild that
+# finishes.
+CUDA_PROVIDER_OPTIONS = {"arena_extend_strategy": "kSameAsRequested"}
+
+
+def _with_provider_options(name: str):
+    """Pair a provider with the options it needs, in onnxruntime's tuple form."""
+    if name == "CUDAExecutionProvider":
+        options = dict(CUDA_PROVIDER_OPTIONS)
+        mem_gb = os.environ.get("DEJA_EMBED_GPU_MEM_GB")
+        if mem_gb:
+            options["gpu_mem_limit"] = int(float(mem_gb) * 1024**3)
+        return (name, options)
+    return name
+
+
 def _embedding_runtime() -> dict:
     """How fastembed should execute, from the environment.
 
@@ -25,7 +45,11 @@ def _embedding_runtime() -> dict:
     opts: dict = {}
     providers = os.environ.get("DEJA_EMBED_PROVIDERS")
     if providers:
-        opts["providers"] = [p.strip() for p in providers.split(",") if p.strip()]
+        opts["providers"] = [
+            _with_provider_options(p.strip())
+            for p in providers.split(",")
+            if p.strip()
+        ]
     device_ids = os.environ.get("DEJA_EMBED_DEVICE_IDS")
     if device_ids:
         opts["device_ids"] = [int(d) for d in device_ids.split(",") if d.strip()]

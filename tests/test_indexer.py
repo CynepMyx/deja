@@ -452,3 +452,36 @@ def test_long_private_key_split_across_chunks_not_leaked():
         for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
             assert "MMMM" not in text, "Key body must not survive in any chunk"
         conn.close()
+
+def test_cuda_provider_carries_arena_options():
+    """A bare provider name is what dies 300 files into a rebuild.
+
+    Variable chunk lengths mean every batch is a new input shape; the default
+    CUDA arena fragments and fails to allocate a buffer far smaller than the
+    free memory on the card.
+    """
+    import os as _os
+    from deja.indexer import _embedding_runtime
+
+    old = {k: _os.environ.get(k) for k in ("DEJA_EMBED_PROVIDERS", "DEJA_EMBED_GPU_MEM_GB")}
+    try:
+        _os.environ["DEJA_EMBED_PROVIDERS"] = "CUDAExecutionProvider,CPUExecutionProvider"
+        _os.environ.pop("DEJA_EMBED_GPU_MEM_GB", None)
+        providers = _embedding_runtime()["providers"]
+        assert providers[0] == (
+            "CUDAExecutionProvider",
+            {"arena_extend_strategy": "kSameAsRequested"},
+        )
+        assert providers[1] == "CPUExecutionProvider"
+
+        _os.environ["DEJA_EMBED_GPU_MEM_GB"] = "8"
+        assert _embedding_runtime()["providers"][0][1]["gpu_mem_limit"] == 8 * 1024**3
+
+        del _os.environ["DEJA_EMBED_PROVIDERS"]
+        assert "providers" not in _embedding_runtime()
+    finally:
+        for key, value in old.items():
+            if value is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = value
