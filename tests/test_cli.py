@@ -113,3 +113,54 @@ def test_stats_health_ok():
         ).fetchone()[0]
         assert orphans == 0
         conn.close()
+
+
+def test_index_rebuilds_when_the_writer_changed(monkeypatch, tmp_path, capsys):
+    """An index written by another build is rebuilt, loudly.
+
+    Silence is the failure mode this guard exists for: the parser drift that
+    emptied assistant prose went unnoticed for months because search kept
+    returning hits.
+    """
+    import argparse
+
+    from deja import cli
+    from deja.parsers import claude_code
+
+    projects = tmp_path / "projects"
+    session_dir = projects / "some-project"
+    session_dir.mkdir(parents=True)
+    with open(session_dir / "sess-drift.jsonl", "w", encoding="utf-8") as f:
+        for line in [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "eine frage"}]}, "timestamp": "2026-03-30T10:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "eine antwort"}]}, "timestamp": "2026-03-30T10:00:05Z", "uuid": "2"},
+        ]:
+            f.write(json.dumps(line) + "\n")
+
+    index_path = tmp_path / "index.db"
+    monkeypatch.setenv("DEJA_INDEX_PATH", str(index_path))
+    monkeypatch.setattr(claude_code, "CLAUDE_PROJECTS_DIR", str(projects))
+
+    args = argparse.Namespace(reindex=False, source="claude-code")
+    cli.cmd_index(args)
+    assert "full reindex" not in capsys.readouterr().err
+
+    conn = sqlite3.connect(index_path)
+    conn.execute("UPDATE meta SET value = '1' WHERE key = 'parser_version'")
+    conn.commit()
+    conn.close()
+
+    cli.cmd_index(args)
+    err = capsys.readouterr().err
+    assert "full reindex" in err
+    assert "parser_version 1" in err
+
+    conn = sqlite3.connect(index_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    vectors = conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+    conn.close()
+    assert chunks > 0
+    assert chunks == vectors, "a rebuild must not leave orphan vectors behind"
