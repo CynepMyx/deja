@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Claude Code sub-agent threads are indexed.** Claude Code writes a separate transcript per delegated thread under `<project>/<session-id>/subagents/agent-*.jsonl`. Discovery only globbed `<project>/*.jsonl`, so all of it was silently invisible — on a workstation that delegates heavily these threads outnumber main sessions, and they hold work the main transcript never contains: delegated research, generated code, sub-agent-only tool calls.
+  - New `kind` column on `chunks` and `sessions`, `"main"` or `"subagent"`.
+  - `include_subagents` flag on `hybrid_search`, the `search` MCP tool and `deja search`. **Off by default** — a query should answer from the conversation the user actually had; opt in for full recall.
+  - Excluding sub-agents widens the candidate pool the same way other filters do, but only when the index actually holds sub-agent chunks — indexes without them keep the cheaper narrow pool.
+  - `deja stats` breaks chunk counts down by kind.
+  - The exclusion is pushed into both retrieval lanes rather than applied to the merged result. A post-filter let sub-agent chunks consume the candidate slots first: on a 276k-chunk index that is 60% sub-agent, broad FTS queries lost half to three quarters of the keyword lane before the merge.
+- **Sub-agent threads link back to the session that spawned them.** `sessions.parent_session_id` is derived from the transcript path, surfaced on every search result, and walkable in the other direction via the new `list_subagent_threads` MCP tool — a delegated finding leads back to the conversation it came from.
+- **`deja analytics` is sub-agent aware.** Delegated threads are separate rows in `sessions`; counting them turned "how many sessions did I have" into "how many threads ran" and let delegated work own the per-session rankings. Excluded by default, `--include-subagents` to opt in.
+- **`deja stats` prints its session count broken down by kind**, so it no longer silently disagrees with `deja analytics` about what counts as a session.
+- **The MCP server survives a stale index.** A schema mismatch was raised inside the lifespan, so the process died at startup and the client only reported that the connection closed. The server now stays up and every tool answers with the version mismatch and the command that fixes it.
+- **`deja stats` and `deja search` report a stale index instead of crashing.** Both opened the database without checking its schema version and died on a missing column; `stats` now keeps printing the rest of its diagnostics and flags the mismatch as an issue.
+
+### Schema
+
+- **SCHEMA_VERSION 4 → 5**, applied **in place**: `kind` on `chunks` and `sessions`, `parent_session_id` on `sessions`. Additive versions now migrate with `ALTER TABLE` and keep their embeddings instead of forcing a full re-embed — the previous behaviour cost hours of CPU on a large index for columns that add in milliseconds. Non-additive versions still drop and rebuild. Run `deja index` once afterwards to pick up sub-agent threads.
+
+### API
+
+- `Parser.discover()` now yields `(path, project_path, kind)` triples instead of pairs. Sources without a sub-agent concept yield `"main"`.
+
+### Tests
+
+- 126 total (was 107): discovery, the schema default, chunk tagging, both filter directions, in-place migration with embeddings kept, retrieval-lane filtering under a k smaller than the sub-agent population, analytics scoping, and the parent link in both directions.
+
+
 ## 0.6.0 (2026-08-24)
 
 ### Features

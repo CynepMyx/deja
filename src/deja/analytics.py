@@ -5,12 +5,25 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 
-def top_sessions_by_cost(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
+def _kind_clause(include_subagents: bool, keyword: str = "WHERE") -> str:
+    """SQL fragment restricting `sessions` to user-facing sessions.
+
+    Sub-agent threads are separate rows in `sessions`; counting them turns
+    "how many sessions did I have" into "how many threads ran", and lets
+    delegated work dominate the per-session rankings. Excluded by default,
+    matching search.
+    """
+    return "" if include_subagents else f" {keyword} kind = 'main'"
+
+
+def top_sessions_by_cost(
+    conn: sqlite3.Connection, n: int = 10, include_subagents: bool = False
+) -> list[dict]:
     rows = conn.execute(
-        """SELECT session_id, source, project_path, started_at, ended_at, turn_count,
+        f"""SELECT session_id, source, project_path, started_at, ended_at, turn_count,
                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                   (input_tokens + output_tokens + cache_creation_tokens) AS total_cost
-           FROM sessions
+           FROM sessions{_kind_clause(include_subagents)}
            ORDER BY total_cost DESC
            LIMIT ?""",
         (n,),
@@ -27,10 +40,12 @@ def top_sessions_by_cost(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
     ]
 
 
-def top_sessions_by_length(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
+def top_sessions_by_length(
+    conn: sqlite3.Connection, n: int = 10, include_subagents: bool = False
+) -> list[dict]:
     rows = conn.execute(
-        """SELECT session_id, source, project_path, started_at, ended_at, turn_count
-           FROM sessions
+        f"""SELECT session_id, source, project_path, started_at, ended_at, turn_count
+           FROM sessions{_kind_clause(include_subagents)}
            ORDER BY turn_count DESC
            LIMIT ?""",
         (n,),
@@ -44,13 +59,13 @@ def top_sessions_by_length(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
     ]
 
 
-def by_project(conn: sqlite3.Connection) -> list[dict]:
+def by_project(conn: sqlite3.Connection, include_subagents: bool = False) -> list[dict]:
     rows = conn.execute(
-        """SELECT COALESCE(project_path, '(unknown)') AS project,
+        f"""SELECT COALESCE(project_path, '(unknown)') AS project,
                   COUNT(*) AS sessions,
                   SUM(turn_count) AS turns,
                   SUM(input_tokens + output_tokens + cache_creation_tokens) AS total_cost
-           FROM sessions
+           FROM sessions{_kind_clause(include_subagents)}
            GROUP BY project
            ORDER BY total_cost DESC"""
     ).fetchall()
@@ -60,11 +75,18 @@ def by_project(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
-def by_tool(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
+def by_tool(
+    conn: sqlite3.Connection, n: int = 10, include_subagents: bool = False
+) -> list[dict]:
+    # Exclude what is known to be a sub-agent rather than requiring a session
+    # row, so a tool_calls row whose session row is missing stays visible.
+    scope = "" if include_subagents else (
+        " WHERE session_id NOT IN (SELECT session_id FROM sessions WHERE kind = 'subagent')"
+    )
     rows = conn.execute(
-        """SELECT tool_name, SUM(call_count) AS total_calls,
+        f"""SELECT tool_name, SUM(call_count) AS total_calls,
                   COUNT(DISTINCT session_id) AS in_sessions
-           FROM tool_calls
+           FROM tool_calls{scope}
            GROUP BY tool_name
            ORDER BY total_calls DESC
            LIMIT ?""",
@@ -76,15 +98,17 @@ def by_tool(conn: sqlite3.Connection, n: int = 10) -> list[dict]:
     ]
 
 
-def by_day(conn: sqlite3.Connection, since_days: int = 30) -> list[dict]:
+def by_day(
+    conn: sqlite3.Connection, since_days: int = 30, include_subagents: bool = False
+) -> list[dict]:
     """One row per day for the last N days. Counts sessions that started that day."""
     rows = conn.execute(
-        """SELECT substr(started_at, 1, 10) AS day,
+        f"""SELECT substr(started_at, 1, 10) AS day,
                   COUNT(*) AS sessions,
                   SUM(turn_count) AS turns,
                   SUM(input_tokens + output_tokens + cache_creation_tokens) AS total_cost
            FROM sessions
-           WHERE started_at IS NOT NULL
+           WHERE started_at IS NOT NULL{_kind_clause(include_subagents, keyword="AND")}
              AND substr(started_at, 1, 10) >= ?
            GROUP BY day
            ORDER BY day"""
@@ -97,23 +121,31 @@ def by_day(conn: sqlite3.Connection, since_days: int = 30) -> list[dict]:
     ]
 
 
-def collect_all(conn: sqlite3.Connection, top: int = 10, since_days: int = 30) -> dict:
-    total_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    total_turns = conn.execute("SELECT COALESCE(SUM(turn_count), 0) FROM sessions").fetchone()[0]
+def collect_all(
+    conn: sqlite3.Connection, top: int = 10, since_days: int = 30,
+    include_subagents: bool = False,
+) -> dict:
+    scope = _kind_clause(include_subagents)
+    total_sessions = conn.execute(f"SELECT COUNT(*) FROM sessions{scope}").fetchone()[0]
+    total_turns = conn.execute(
+        f"SELECT COALESCE(SUM(turn_count), 0) FROM sessions{scope}"
+    ).fetchone()[0]
     total_cost = conn.execute(
-        "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens), 0) FROM sessions"
+        "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens), 0)"
+        f" FROM sessions{scope}"
     ).fetchone()[0]
     return {
         "totals": {
             "sessions": total_sessions,
             "turns": total_turns,
             "total_cost_tokens": total_cost,
+            "includes_subagents": include_subagents,
         },
-        "top_cost": top_sessions_by_cost(conn, top),
-        "top_length": top_sessions_by_length(conn, top),
-        "by_project": by_project(conn),
-        "by_tool": by_tool(conn, top),
-        "by_day": by_day(conn, since_days),
+        "top_cost": top_sessions_by_cost(conn, top, include_subagents),
+        "top_length": top_sessions_by_length(conn, top, include_subagents),
+        "by_project": by_project(conn, include_subagents),
+        "by_tool": by_tool(conn, top, include_subagents),
+        "by_day": by_day(conn, since_days, include_subagents),
     }
 
 
