@@ -124,6 +124,8 @@ async def search(
     source: optional filter, e.g. 'claude-code' or 'codex'.
     git_branch: filter by exact git branch captured at message time (Claude Code only for now).
     git_branch_prefix: filter by branch prefix, e.g. 'feature/' matches feature/*.
+    date_from / date_to: UTC, YYYY-MM-DD or a full ISO timestamp; a date-only
+    date_to includes that whole day. Filters apply before ranking.
     """
     lc = ctx.lifespan_context
     lazy_model = lc.get("model")

@@ -95,7 +95,7 @@ Restart Claude Code — deja will appear as a connected MCP server.
 - `limit` (int, default 10) — max results
 - `project` (string, optional) — filter by project
 - `source` (string, optional) — filter by source: `claude-code`, `codex`
-- `date_from` / `date_to` (string, optional) — ISO date range
+- `date_from` / `date_to` (string, optional) — UTC, `YYYY-MM-DD` or full ISO timestamp; a date-only `date_to` includes that whole day
 
 ### Auto-indexing (optional)
 

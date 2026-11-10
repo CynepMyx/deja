@@ -7,7 +7,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from deja.db import init_db, get_meta, SCHEMA_VERSION
+from deja.db import init_db, get_meta, SCHEMA_VERSION, fts_needs_rebuild, rebuild_fts
 from deja.indexer import get_embedding_model, index_file, gc_orphans
 from deja.config import get_index_dir, get_index_path
 from deja.parsers.registry import all_sources, get_parser
@@ -63,6 +63,12 @@ def cmd_index(args):
             conn.execute("DELETE FROM chunks_fts")
             conn.execute("DELETE FROM indexed_files")
             conn.commit()
+
+        if fts_needs_rebuild(conn):
+            print("[deja] rebuilding full-text index for the new tokenizer "
+                  "(embeddings kept)...", file=sys.stderr)
+            rows = rebuild_fts(conn)
+            print(f"[deja] full-text index rebuilt: {rows} chunks", file=sys.stderr)
 
         sources = all_sources() if args.source == "all" else [args.source]
         print(f"[deja] sources: {', '.join(sources)}", file=sys.stderr)
