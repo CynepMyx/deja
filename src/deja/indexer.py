@@ -3,7 +3,7 @@ import sys
 from itertools import islice
 from fastembed import TextEmbedding
 from fastembed.text.text_embedding import PoolingType, ModelSource
-from deja.db import serialize_f32
+from deja.db import serialize_f32, get_meta
 from deja.parsers.registry import get_parser
 from deja.chunker import make_chunks
 
@@ -193,7 +193,10 @@ def index_file(
         # Commit after each batch — crash-safe resume from last committed offset
         last = batch_turns[-1]
         batch_offset = last.get("completed_offset", None)
-        next_idx = last["message_index"] if last.get("provisional") else last["message_index"] + 1
+        if last.get("provisional"):
+            next_idx = last.get("resume_message_index", last["message_index"])
+        else:
+            next_idx = last["message_index"] + 1
         if batch_offset is not None:
             _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx, stat_result=stat_before)
         conn.commit()
@@ -261,6 +264,77 @@ def _update_file_meta(conn, path: str, completed_offset: int = None,
         VALUES (?, ?, ?, ?, ?, ?)""",
         (path, offset, stat.st_mtime, stat.st_size, source, next_message_index),
     )
+
+CURRENT_PARSER_VERSION = "2"
+
+
+def reattach_tool_results(conn, model, log=print) -> dict:
+    """One-time fix for indexes built by parser v1, which put each tool result
+    on the turn after the call and dropped all but the last of parallel results.
+
+    Turn boundaries and texts are the same in v2, so embeddings stay valid:
+    every claude-code file is re-parsed and only tool_result_text (and its FTS
+    row) is rewritten. A session whose chunk_text does not match is
+    reindexed in full. Commits per file; the version is bumped only at the end,
+    so an interrupted run starts over next time.
+    """
+    stats = {"files": 0, "updated": 0, "unchanged": 0, "missing": 0, "reindexed": 0}
+    if get_meta(conn).get("parser_version") == CURRENT_PARSER_VERSION:
+        return stats
+    parser = get_parser("claude-code")
+    rows = conn.execute(
+        "SELECT path FROM indexed_files WHERE source = 'claude-code'"
+    ).fetchall()
+    for (path,) in rows:
+        if not os.path.exists(path):
+            continue
+        stats["files"] += 1
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        mismatch = False
+        updates = []
+        for turn in parser.parse(path):
+            for chunk in make_chunks(turn, session_id, ""):
+                row = conn.execute(
+                    """SELECT id, chunk_text, tool_result_text FROM chunks
+                       WHERE session_id = ? AND message_index = ? AND split_index = ?""",
+                    (session_id, chunk["message_index"], chunk["split_index"]),
+                ).fetchone()
+                if row is None:
+                    stats["missing"] += 1
+                    continue
+                cid, chunk_text, tool_text = row
+                if chunk_text != chunk["chunk_text"]:
+                    mismatch = True
+                    break
+                if (tool_text or "") != chunk["tool_result_text"]:
+                    updates.append((cid, chunk_text, chunk["tool_result_text"]))
+                else:
+                    stats["unchanged"] += 1
+            if mismatch:
+                break
+        if mismatch:
+            project = conn.execute(
+                "SELECT project_path FROM chunks WHERE session_id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+            conn.execute("DELETE FROM indexed_files WHERE path = ?", (path,))
+            index_file(conn, model, path, project[0] if project else "", source="claude-code")
+            stats["reindexed"] += 1
+        else:
+            for cid, chunk_text, tool_text in updates:
+                conn.execute("UPDATE chunks SET tool_result_text = ? WHERE id = ?", (tool_text, cid))
+                conn.execute(
+                    "INSERT OR REPLACE INTO chunks_fts (rowid, chunk_text, tool_result_text) VALUES (?, ?, ?)",
+                    (cid, chunk_text, tool_text),
+                )
+            stats["updated"] += len(updates)
+        conn.commit()
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('parser_version', ?)",
+        (CURRENT_PARSER_VERSION,),
+    )
+    conn.commit()
+    return stats
+
 
 def gc_orphans(conn, known_paths: set[str], sources: list[str] = None):
     """Remove index entries for files that no longer exist on disk.

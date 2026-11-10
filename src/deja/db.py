@@ -134,7 +134,9 @@ def init_db(db_path: str) -> sqlite3.Connection:
         "schema_version": str(SCHEMA_VERSION),
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dim": str(EMBEDDING_DIM),
-        "parser_version": "1",
+        # v2: tool results on the turn that called the tool. Old indexes keep
+        # "1" (INSERT OR IGNORE) and get fixed by reattach_tool_results.
+        "parser_version": "2",
     }
     for key, value in meta_defaults.items():
         conn.execute(

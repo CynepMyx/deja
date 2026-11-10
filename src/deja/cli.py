@@ -8,7 +8,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from deja.db import init_db, get_meta, SCHEMA_VERSION, fts_needs_rebuild, rebuild_fts
-from deja.indexer import get_embedding_model, index_file, gc_orphans
+from deja.indexer import get_embedding_model, index_file, gc_orphans, reattach_tool_results
 from deja.config import get_index_dir, get_index_path
 from deja.parsers.registry import all_sources, get_parser
 
@@ -89,6 +89,10 @@ def cmd_index(args):
             index_file(conn, model, path, project, source=src)
 
         gc_orphans(conn, known_paths, sources=sources)
+        if "claude-code" in sources:
+            stats = reattach_tool_results(conn, model)
+            if stats["files"]:
+                print(f"[deja] tool results reattached: {stats}", file=sys.stderr)
         conn.close()
         print("[deja] indexing complete", file=sys.stderr)
     finally:
