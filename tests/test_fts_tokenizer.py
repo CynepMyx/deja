@@ -112,3 +112,9 @@ def test_cmd_index_rebuilds_old_fts(tmp_path, monkeypatch):
         assert c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
     finally:
         c.close()
+
+
+@pytest.mark.parametrize("query", ["rm -rf /", "cd -", "rm -rf /tmp/x"])
+def test_punctuation_only_tokens_do_not_empty_the_match(conn, query):
+    cid = _add_chunk(conn, 0, "rm -rf /tmp/x then cd - back")
+    assert cid in _found(conn, query)

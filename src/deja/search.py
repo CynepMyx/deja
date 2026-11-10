@@ -18,8 +18,13 @@ _CHUNK_COLS = """c.id, c.session_id, c.message_index, c.timestamp,
 
 
 def fts5_escape(query: str) -> str:
-    """Escape query for FTS5: token-wise AND, each token quoted."""
-    tokens = query.split()
+    """Escape query for FTS5: token-wise AND, each token quoted.
+
+    Tokens with no word character ("/", "-") are dropped: the tokenizer
+    yields nothing for them, and an empty phrase would make the AND match
+    no rows at all.
+    """
+    tokens = [t for t in query.split() if re.search(r"\w", t)]
     if not tokens:
         return '""'
     escaped = ['"' + t.replace('"', '""') + '"' for t in tokens]
