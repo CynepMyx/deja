@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- **Filters narrow the candidates before ranking.** `hybrid_search` used to take the global top 20 (top 100 with filters) from the whole index and only then drop rows outside `project` / `source` / `git_branch` / dates. On a 165k-chunk index a one-day filter usually came back empty although that day had hundreds of chunks. Both legs now filter first: FTS gets the conditions in its `WHERE`, the vector leg ranks exact L2 distances over the matching ids when there are at most 20 000 of them, and for wider filters runs KNN with `k` scaled by the filter's selectivity (capped at 4096). On a copy of a real index: a file name searched within one day went from 0 to 5 hits, narrow searches got faster (~0.3 s vs ~0.5 s), unfiltered and wide-filter searches are unchanged.
+- **A date-only `date_to` includes that day.** Timestamps are stored as `2026-08-02T16:49:32Z`, so `date_to="2026-08-02"` used to exclude the whole of 2 August, and `date_from == date_to` always returned nothing. A full timestamp is still compared as given.
+- **`git_branch_prefix` is matched literally**, so `_` and `%` in a prefix are not wildcards.
+- **File names and path fragments are findable.** The FTS tokenizer was `unicode61 tokenchars '-._/:'`, which kept a whole path such as `/opt/app/scripts/monitor.sh.bak-1` as one token: the file name alone, or `scripts/monitor.sh`, never matched. Plain `unicode61` splits on punctuation, and since every query token is quoted it matches as a phrase, so `monitor.sh.bak-1`, `scripts/monitor.sh` and the full path all find it. IPs such as `77.237.235.33` still match as phrases.
+
+### Upgrade
+
+- Still SCHEMA_VERSION 4, embeddings are kept. The first `deja index` after upgrading notices the old tokenizer and rebuilds only the FTS table from `chunks` in one transaction (about 25 s for 165k chunks); if interrupted, the old table stays and the next run retries. Until then search keeps the old tokenizer behaviour.
+
 ## 0.6.0 (2026-08-24)
 
 ### Features
