@@ -9,9 +9,16 @@
 - **`git_branch_prefix` is matched literally**, so `_` and `%` in a prefix are not wildcards.
 - **File names and path fragments are findable.** The FTS tokenizer was `unicode61 tokenchars '-._/:'`, which kept a whole path such as `/opt/app/scripts/monitor.sh.bak-1` as one token: the file name alone, or `scripts/monitor.sh`, never matched. Plain `unicode61` splits on punctuation, and since every query token is quoted it matches as a phrase, so `monitor.sh.bak-1`, `scripts/monitor.sh` and the full path all find it. IPs such as `77.237.235.33` still match as phrases. Query tokens with no word character (`/` in `rm -rf /`, `-` in `cd -`) are dropped: the new tokenizer yields nothing for them, and an empty phrase made the whole AND match no rows.
 
+- **Tool results land on the turn that called the tool** (Claude Code parser). A turn starts at every `user` record, and Claude Code writes tool results as `user` records, so each result was stored on the next step, next to a different command; when several results came in a row, all but the last were dropped. Checked against all 152 local sessions (128 921 turns): before, 84 066 of 94 987 checkable results sat on the wrong turn; now 128, all of them results whose text is masked by secret redaction, so the check cannot see them. Stored tool text grew from 81.2M to 86.0M characters.
+  - Finished turns wait in a queue until each `tool_use` has its `tool_result`, matched by `tool_use_id`; parallel calls that Claude Code writes interleaved with their results (call, call, result, call, result) are handled. A turn is released early when an assistant entry of a different `message.id` starts, since by then the API has all results.
+  - Turn boundaries, `user_text`, `assistant_text` and `message_index` are byte-identical to before (same 152 sessions), so embeddings stay valid.
+  - Turns still waiting for results at EOF are provisional and the next run restarts from the first of them (`resume_message_index` on the turn).
+  - Codex is unaffected: its parser already keeps calls and outputs in one turn up to the next user message.
+
 ### Upgrade
 
 - Still SCHEMA_VERSION 4, embeddings are kept. The first `deja index` after upgrading notices the old tokenizer and rebuilds only the FTS table from `chunks` in one transaction (about 25 s for 165k chunks); if interrupted, the old table stays and the next run retries. Until then search keeps the old tokenizer behaviour.
+- Indexes built by parser v1 (`meta.parser_version = 1`) get their tool results reattached on the first `deja index`: every Claude Code file is re-parsed and only `tool_result_text` and its FTS row are rewritten, embeddings kept, one commit per file, the version bumped at the end. A session whose `chunk_text` does not match is reindexed in full. On a copy of a 165k-chunk index: 119 103 chunks updated, 27 307 already right, 0 sessions reindexed, 4.4 minutes at normal priority. New indexes start at version 2.
 
 ## 0.6.0 (2026-08-24)
 

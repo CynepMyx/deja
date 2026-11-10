@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import sys
+from collections import deque
 from typing import Generator, Iterator
 
 from deja.config import CLAUDE_PROJECTS_DIR
@@ -80,39 +81,98 @@ def _accumulate_usage(acc: dict, new: dict) -> dict:
         acc[k] = acc.get(k, 0) + new.get(k, 0)
     return acc
 
+def _empty_usage() -> dict:
+    return {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
+
+
+def _tool_results(content) -> list[tuple[str | None, str]]:
+    """(tool_use_id, text) for each tool_result block, text as extract_content builds it."""
+    if not isinstance(content, list):
+        return []
+    out = []
+    for block in content:
+        if block.get("type") != "tool_result":
+            continue
+        raw = block.get("content", "")
+        if isinstance(raw, list):
+            raw = " ".join(b.get("text", "") for b in raw if isinstance(b, dict))
+        if isinstance(raw, str):
+            out.append((block.get("tool_use_id"), raw))
+    return out
+
+
+def _tool_use_ids(content) -> set:
+    if not isinstance(content, list):
+        return set()
+    return {b.get("id") for b in content if b.get("type") == "tool_use" and b.get("id")}
+
+
+def _build(state: dict, completed_offset: int, provisional: bool = False,
+           resume_index: int | None = None) -> dict:
+    combined_tool = "\n".join(
+        filter(None, [state["user"]["tool_result"], *state["results"], *state["asst_tools"]])
+    )
+    turn = {
+        "user_text": state["user"]["text"],
+        "assistant_text": "\n\n".join(state["parts"]),
+        "tool_result_text": combined_tool,
+        "timestamp": state["last_ts"] or state["user"]["timestamp"],
+        "message_index": state["message_index"],
+        "completed_offset": completed_offset,
+        "git_branch": state["git_branch"],
+        "usage": dict(state["usage"]),
+        "tool_names": list(state["tool_names"]),
+    }
+    if provisional:
+        turn["provisional"] = True
+        turn["resume_message_index"] = (
+            state["message_index"] if resume_index is None else resume_index
+        )
+    turn = redact_turn(turn)
+    turn["tool_result_text"] = turn["tool_result_text"][:TOOL_RESULT_MAX]
+    return turn
+
+
 def parse_jsonl_file(
     path: str, offset: int = 0, start_message_index: int = 0
 ) -> Generator[dict, None, None]:
-    pending_user = None
-    asst_parts: list[str] = []
-    asst_tools: list[str] = []
-    asst_tool_names: list[str] = []
-    asst_usage: dict = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
-    git_branch: str | None = None
-    last_ts = ""
-    turn_start = offset
+    """Yield one turn per assistant step: the user record before it and the
+    assistant entries up to the next user record.
+
+    Tool results arrive as user records after the call, and with parallel
+    calls Claude Code interleaves calls and results of one response. A
+    finished turn therefore waits in a queue until every tool_use it issued
+    has its tool_result (matched by tool_use_id), or until an assistant entry
+    of a different message starts, by which point the API has all results.
+    Turns leave the queue in order. A turn's completed_offset is the user
+    record that closed it, so a resumed parse starts on a user record;
+    results there for turns indexed earlier have unknown ids and are skipped.
+    Turns still queued at EOF are provisional and restart from the first of
+    them (resume_message_index).
+    """
+    state = None
+    queue: deque = deque()
+    resumed = offset > 0
     message_index = start_message_index
 
-    def _build(completed_offset: int, provisional: bool = False) -> dict:
-        combined_tool = "\n".join(
-            filter(None, [pending_user["tool_result"], *asst_tools])
-        )
-        turn = {
-            "user_text": pending_user["text"],
-            "assistant_text": "\n\n".join(asst_parts),
-            "tool_result_text": combined_tool,
-            "timestamp": last_ts or pending_user["timestamp"],
-            "message_index": message_index,
-            "completed_offset": completed_offset,
-            "git_branch": git_branch,
-            "usage": dict(asst_usage),
-            "tool_names": list(asst_tool_names),
+    def _new_state(user: dict, branch, start: int) -> dict:
+        return {
+            "user": user, "parts": [], "asst_tools": [], "results": [],
+            "tool_names": [], "usage": _empty_usage(), "git_branch": branch,
+            "last_ts": "", "start": start, "end": None,
+            "message_index": message_index, "ids": set(), "answered": set(),
+            "msg_ids": set(),
         }
-        if provisional:
-            turn["provisional"] = True
-        turn = redact_turn(turn)
-        turn["tool_result_text"] = turn["tool_result_text"][:TOOL_RESULT_MAX]
-        return turn
+
+    def _drain(force_unless_msg=None):
+        while queue:
+            head = queue[0]
+            done = head["ids"] <= head["answered"]
+            stale = force_unless_msg is not None and force_unless_msg not in head["msg_ids"]
+            if not (done or stale):
+                break
+            queue.popleft()
+            yield _build(head, head["end"])
 
     with open(path, "r", encoding="utf-8") as f:
         if offset > 0:
@@ -143,40 +203,57 @@ def parse_jsonl_file(
             record_branch = entry.get("gitBranch")
 
             if entry_type == "user":
-                if pending_user is not None and asst_parts:
-                    yield _build(line_start)
+                text, _, _ = extract_content(content)
+                if state is not None and state["parts"]:
+                    state["end"] = line_start
+                    queue.append(state)
                     message_index += 1
-                text, tool_text, _ = extract_content(content)
-                pending_user = {
-                    "text": text,
-                    "tool_result": tool_text,
-                    "timestamp": timestamp,
-                }
-                asst_parts = []
-                asst_tools = []
-                asst_tool_names = []
-                asst_usage = {"input_tokens": 0, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 0}
-                git_branch = record_branch
-                last_ts = ""
-                turn_start = line_start
+                leftover = []
+                for tool_id, result in _tool_results(content):
+                    owner = next((t for t in reversed(queue) if tool_id in t["ids"]), None)
+                    if owner is not None:
+                        owner["results"].append(result)
+                        owner["answered"].add(tool_id)
+                    elif resumed:
+                        continue
+                    elif queue:
+                        queue[-1]["results"].append(result)
+                    else:
+                        leftover.append(result)
+                state = _new_state(
+                    {"text": text, "tool_result": "\n".join(leftover), "timestamp": timestamp},
+                    record_branch, line_start,
+                )
+                yield from _drain()
 
             elif entry_type == "assistant":
-                if pending_user is None:
+                if state is None:
                     continue
+                msg_id = message.get("id") or f"line:{line_start}"
+                yield from _drain(force_unless_msg=msg_id)
                 text, tool_text, tool_names = extract_content(content)
                 if text:
-                    asst_parts.append(text)
+                    state["parts"].append(text)
                 if tool_text:
-                    asst_tools.append(tool_text)
+                    state["asst_tools"].append(tool_text)
                 if tool_names:
-                    asst_tool_names.extend(tool_names)
-                _accumulate_usage(asst_usage, _extract_usage(message))
+                    state["tool_names"].extend(tool_names)
+                state["ids"] |= _tool_use_ids(content)
+                state["msg_ids"].add(msg_id)
+                _accumulate_usage(state["usage"], _extract_usage(message))
                 if record_branch:
-                    git_branch = record_branch
-                last_ts = timestamp
+                    state["git_branch"] = record_branch
+                state["last_ts"] = timestamp
 
-        if pending_user is not None and asst_parts:
-            yield _build(turn_start, provisional=True)
+        pending = list(queue)
+        if state is not None and state["parts"]:
+            pending.append(state)
+        if pending:
+            first = pending[0]
+            for t in pending:
+                yield _build(t, first["start"], provisional=True,
+                             resume_index=first["message_index"])
+
 
 def get_file_end_offset(path: str) -> int:
     with open(path, "rb") as f:
