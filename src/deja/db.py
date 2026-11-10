@@ -7,6 +7,10 @@ import sqlite_vec
 SCHEMA_VERSION = 4
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_DIM = 384
+# Plain unicode61 splits paths and file names on punctuation, so a quoted
+# query token such as "monitor.sh.bak-1" matches as a phrase inside a longer
+# path. The old tokenchars '-._/:' kept whole paths as one token.
+FTS_TOKENIZE = "unicode61"
 
 def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack("%sf" % len(vector), *vector)
@@ -114,13 +118,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         )
     """)
 
-    conn.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            chunk_text,
-            tool_result_text,
-            tokenize = "unicode61 tokenchars '-._/:'"
-        )
-    """)
+    _create_fts(conn)
 
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
@@ -146,6 +144,43 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
     conn.commit()
     return conn
+
+def _create_fts(conn: sqlite3.Connection):
+    conn.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            chunk_text,
+            tool_result_text,
+            tokenize = '{FTS_TOKENIZE}'
+        )
+    """)
+
+def fts_needs_rebuild(conn: sqlite3.Connection) -> bool:
+    """True when chunks_fts still uses the old tokenchars tokenizer."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'"
+    ).fetchone()
+    return bool(row) and "tokenchars" in row[0]
+
+def rebuild_fts(conn: sqlite3.Connection) -> int:
+    """Recreate chunks_fts with the current tokenizer from the chunks table.
+
+    Embeddings are untouched. Runs in one transaction, so an interrupted
+    rebuild leaves the old table in place. Returns the number of rows indexed.
+    """
+    conn.commit()
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS chunks_fts")
+        _create_fts(conn)
+        conn.execute(
+            """INSERT INTO chunks_fts (rowid, chunk_text, tool_result_text)
+               SELECT id, chunk_text, COALESCE(tool_result_text, '') FROM chunks"""
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
 
 def get_meta(conn: sqlite3.Connection) -> dict:
     rows = conn.execute("SELECT key, value FROM meta").fetchall()
