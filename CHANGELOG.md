@@ -15,10 +15,13 @@
   - Turns still waiting for results at EOF are provisional and the next run restarts from the first of them (`resume_message_index` on the turn).
   - Codex is unaffected: its parser already keeps calls and outputs in one turn up to the next user message.
 
+- **A run killed mid-file no longer leaves the file marked as fully indexed.** `index_file` commits after every batch of 50 turns, and every commit stored the file's final size and mtime. If the run died after the first batch (hook killed, app closed, embedding error), `check_needs_reindex` saw an unchanged size and mtime and skipped the rest of the file for good. On a real index one 22 MB session held turns 0–49 of 1695 for months. Per-batch rows now store `last_size = -1` (partial), and the real size and mtime are written only once the whole file is parsed, so the next run resumes from the last committed batch.
+
 ### Upgrade
 
 - Still SCHEMA_VERSION 4, embeddings are kept. The first `deja index` after upgrading notices the old tokenizer and rebuilds only the FTS table from `chunks` in one transaction (about 25 s for 165k chunks); if interrupted, the old table stays and the next run retries. Until then search keeps the old tokenizer behaviour.
 - Indexes built by parser v1 (`meta.parser_version = 1`) get their tool results reattached on the first `deja index`: every Claude Code file is re-parsed and only `tool_result_text` and its FTS row are rewritten, embeddings kept, one commit per file, the version bumped at the end. A session whose `chunk_text` does not match is reindexed in full. On a copy of a 165k-chunk index: 119 103 chunks updated, 27 307 already right, 0 sessions reindexed, 4.4 minutes at normal priority. New indexes start at version 2.
+- Files left behind by that bug in older versions are found once, on the first `deja index`: each file whose stored offset is short of its size is parsed from that offset, and it is marked partial if a complete (non-provisional) turn is still there. Normally that tail is just the last provisional turn: 225 files took 0.3 s.
 
 ## 0.6.0 (2026-08-24)
 
