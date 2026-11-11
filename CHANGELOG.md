@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- **`deja eval` can judge results by chunk, not only by session.** A golden pair may now set `expected_text` (strings the right chunk contains in `chunk_text` or `tool_result_text`), `expected_date_from` / `expected_date_to` (the day range of the original conversation) and `filters` (passed to the search). All criteria must hold for the same result. Pairs with only `expected_sessions` work as before. Session-level pairs say little when a few long sessions hold most of the index: on a real one, 5 of 234 sessions hold 83% of chunks.
+
 ### Fixes
 
 - **Filters narrow the candidates before ranking.** `hybrid_search` used to take the global top 20 (top 100 with filters) from the whole index and only then drop rows outside `project` / `source` / `git_branch` / dates. On a 165k-chunk index a one-day filter usually came back empty although that day had hundreds of chunks. Both legs now filter first: FTS gets the conditions in its `WHERE`, the vector leg ranks exact L2 distances over the matching ids when there are at most 20 000 of them, and for wider filters runs KNN with `k` scaled by the filter's selectivity (capped at 4096). On a copy of a real index: a file name searched within one day went from 0 to 5 hits, narrow searches got faster (~0.3 s vs ~0.5 s), unfiltered and wide-filter searches are unchanged.

@@ -17,6 +17,40 @@ def load_golden(path: str) -> list[dict]:
         return json.load(f)
 
 
+SEARCH_FILTERS = ("project", "source", "git_branch", "git_branch_prefix", "date_from", "date_to")
+
+
+def is_hit(result: dict, pair: dict) -> bool:
+    """Does one search result satisfy a golden pair?
+
+    A pair names what a correct result looks like; every criterion it sets
+    must hold for the same result:
+      expected_sessions  - the result's session_id is one of these;
+      expected_text      - chunk_text or tool_result_text contains one of
+                           these strings (case-insensitive);
+      expected_date_from / expected_date_to - the result's timestamp falls in
+                           this range (YYYY-MM-DD, inclusive).
+    Session-level pairs say little when a few long sessions hold most of the
+    index; expected_text plus a date range pins the original conversation.
+    """
+    sessions = pair.get("expected_sessions")
+    if sessions and result.get("session_id") not in sessions:
+        return False
+    texts = pair.get("expected_text")
+    if texts:
+        hay = " ".join(
+            filter(None, [result.get("chunk_text"), result.get("tool_result_text")])
+        ).lower()
+        if not any(t.lower() in hay for t in texts):
+            return False
+    day = (result.get("timestamp") or "")[:10]
+    if pair.get("expected_date_from") and day < pair["expected_date_from"]:
+        return False
+    if pair.get("expected_date_to") and day > pair["expected_date_to"]:
+        return False
+    return True
+
+
 def evaluate(golden_path: str = None, index_path: str = None, limit: int = 5):
     golden_path = golden_path or DEFAULT_GOLDEN
     index_path = index_path or get_index_path()
@@ -43,18 +77,16 @@ def evaluate(golden_path: str = None, index_path: str = None, limit: int = 5):
 
     for pair in pairs:
         query = pair["query"]
-        expected = set(pair["expected_sessions"])
+        filters = {k: v for k, v in (pair.get("filters") or {}).items() if k in SEARCH_FILTERS}
 
         t0 = time.perf_counter()
-        results = hybrid_search(conn, model, query, limit=limit)
+        results = hybrid_search(conn, model, query, limit=limit, **filters)
         elapsed = time.perf_counter() - t0
         total_time += elapsed
 
-        result_sessions = [r["session_id"] for r in results]
-
         rr = 0.0
-        for rank, sid in enumerate(result_sessions, 1):
-            if sid in expected:
+        for rank, result in enumerate(results, 1):
+            if is_hit(result, pair):
                 rr = 1.0 / rank
                 break
 
