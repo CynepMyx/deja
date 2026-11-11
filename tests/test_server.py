@@ -73,3 +73,36 @@ def test_get_context_not_found():
         assert anchor_id is None
         assert chunks == []
         conn.close()
+
+
+def test_get_session_returns_tool_output():
+    """Reading a session back must not be poorer than the search hit for it.
+
+    Search already returns `tool_result_text` for the same chunk; without it
+    here, the command output that carries the actual answer is gone the moment
+    you follow a hit into its session.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = os.path.join(tmp, "sess-tools.jsonl")
+        lines = [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "list the files"}]}, "timestamp": "2026-03-30T10:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "checking"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]}, "timestamp": "2026-03-30T10:00:01Z", "uuid": "2"},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "deploy.log"}]}, "timestamp": "2026-03-30T10:00:02Z", "uuid": "3"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "one file"}]}, "timestamp": "2026-03-30T10:00:03Z", "uuid": "4"},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        index_file(conn, model, path, "test-project")
+
+        result = _do_get_session(conn, "sess-tools")
+        assert result, "session must be readable"
+        assert all("tool_result_text" in row for row in result)
+        assert "deploy.log" in " ".join(row["tool_result_text"] for row in result)
+        conn.close()

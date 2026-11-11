@@ -132,3 +132,48 @@ def test_consecutive_assistant_entries_accumulated():
         assert "first part" in turns[0]["assistant_text"]
         assert "second part" in turns[0]["assistant_text"], "Second assistant entry must not be dropped"
         assert turns[1].get("provisional") is True
+
+def test_thinking_only_first_entry_keeps_the_prose_that_follows():
+    """The shape that emptied three months of the index.
+
+    Claude Code writes thinking and tool calls first and the model's prose
+    last. A parser that ends the turn at the first assistant entry stores the
+    thinking-only one, which extracts to "", and drops the answer.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "warum ist der index leer?"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "weighing the options"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "weil der Parser die Prosa verwirft"}]}, "timestamp": "2026-01-01T00:00:02Z", "uuid": "3"},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "danke"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "4"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "gern"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "5"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        assert "weil der Parser die Prosa verwirft" in turns[0]["assistant_text"]
+        assert "weighing" not in turns[0]["assistant_text"]
+
+
+def test_prose_after_a_tool_round_trip_survives():
+    """user -> assistant(text+tool_use) -> user(tool_result) -> assistant(text).
+
+    The tool_result arrives as a `user` entry and therefore opens a new turn.
+    The closing prose must still land in a chunk somewhere rather than being
+    dropped along with the turn boundary.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "session.jsonl")
+        _write_jsonl(path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "list the files"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "checking"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "a.txt\nb.txt"}]}, "timestamp": "2026-01-01T00:00:02Z", "uuid": "3"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "there are two files"}]}, "timestamp": "2026-01-01T00:00:03Z", "uuid": "4"},
+        ])
+        turns = list(parse_jsonl_file(path))
+        prose = " ".join(t["assistant_text"] for t in turns)
+        assert "there are two files" in prose
+        assert "checking" in prose
+        assert "a.txt" in " ".join(t["tool_result_text"] for t in turns)

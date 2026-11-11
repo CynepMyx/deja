@@ -452,3 +452,43 @@ def test_long_private_key_split_across_chunks_not_leaked():
         for (text,) in conn.execute("SELECT chunk_text FROM chunks").fetchall():
             assert "MMMM" not in text, "Key body must not survive in any chunk"
         conn.close()
+
+def test_reindex_over_a_provisional_turn_keeps_its_text():
+    """The last turn of a live session is provisional and gets rewritten.
+
+    `_delete_chunks_from` clears from the resume index upward and the parser
+    re-emits from the stored byte offset. If those two disagree, the rewrite
+    lands next to the original instead of on top of it, or replaces real text
+    with an empty turn.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        conn = init_db(db_path)
+        model = get_embedding_model()
+        path = _make_session(tmp, "sess.jsonl", [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "erste frage"}]}, "timestamp": "2026-01-01T00:00:00Z", "uuid": "1"},
+            {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "hmm"}]}, "timestamp": "2026-01-01T00:00:01Z", "uuid": "2"},
+        ])
+        index_file(conn, model, path, "test-project")
+
+        # The prose arrives after the first pass, as it does in a live session.
+        time.sleep(0.01)
+        _append_lines(path, [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "die vollstaendige antwort"}]}, "timestamp": "2026-01-01T00:00:02Z", "uuid": "3"},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "zweite frage"}]}, "timestamp": "2026-01-01T00:01:00Z", "uuid": "4"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "zweite antwort"}]}, "timestamp": "2026-01-01T00:01:01Z", "uuid": "5"},
+        ])
+        index_file(conn, model, path, "test-project")
+
+        rows = conn.execute(
+            "SELECT message_index, split_index, chunk_text FROM chunks"
+            " ORDER BY message_index, split_index"
+        ).fetchall()
+        text = " ".join(r[2] for r in rows)
+        assert "die vollstaendige antwort" in text
+        assert "zweite antwort" in text
+        assert len(rows) == len({(r[0], r[1]) for r in rows}), "no duplicated turn slots"
+
+        vectors = conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+        assert vectors == len(rows)
+        conn.close()

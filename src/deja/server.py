@@ -66,13 +66,24 @@ def _do_search(conn, model, query, limit=10, project=None, source=None,
 
 
 def _do_get_session(conn, session_id):
+    # tool_result_text comes along because search already returns it for the
+    # same chunk: without it, reading a session back is strictly poorer than
+    # the search hit that pointed at it, and the tool output that carries the
+    # actual answer to "what did that command say" is simply gone.
     rows = conn.execute(
-        """SELECT chunk_text, message_index, timestamp, project_path
+        """SELECT chunk_text, tool_result_text, message_index, timestamp,
+                  project_path
         FROM chunks WHERE session_id = ? ORDER BY message_index, split_index""",
         (session_id,),
     ).fetchall()
     return [
-        {"chunk_text": r[0], "message_index": r[1], "timestamp": r[2], "project_path": r[3]}
+        {
+            "chunk_text": r[0],
+            "tool_result_text": r[1] or "",
+            "message_index": r[2],
+            "timestamp": r[3],
+            "project_path": r[4],
+        }
         for r in rows
     ]
 
