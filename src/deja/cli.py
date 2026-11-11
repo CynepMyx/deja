@@ -8,7 +8,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from deja.db import init_db, get_meta, SCHEMA_VERSION, fts_needs_rebuild, rebuild_fts
-from deja.indexer import get_embedding_model, index_file, gc_orphans, reattach_tool_results
+from deja.indexer import (
+    get_embedding_model, index_file, gc_orphans, reattach_tool_results, mark_unfinished_files,
+)
 from deja.config import get_index_dir, get_index_path
 from deja.parsers.registry import all_sources, get_parser
 
@@ -69,6 +71,14 @@ def cmd_index(args):
                   "(embeddings kept)...", file=sys.stderr)
             rows = rebuild_fts(conn)
             print(f"[deja] full-text index rebuilt: {rows} chunks", file=sys.stderr)
+
+        if get_meta(conn).get("unfinished_check") != "1":
+            marked = mark_unfinished_files(conn)
+            if marked:
+                print(f"[deja] resuming {len(marked)} files left unfinished by an "
+                      "interrupted run", file=sys.stderr)
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('unfinished_check', '1')")
+            conn.commit()
 
         sources = all_sources() if args.source == "all" else [args.source]
         print(f"[deja] sources: {', '.join(sources)}", file=sys.stderr)

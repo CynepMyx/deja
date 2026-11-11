@@ -165,6 +165,7 @@ def index_file(
     parser = get_parser(source)
     turns_gen = parser.parse(path, offset=offset, start_message_index=start_message_index)
     indexed_any = False
+    resume = None
 
     for batch_turns in _iter_batches(turns_gen, TURNS_PER_BATCH):
         chunks = []
@@ -190,7 +191,9 @@ def index_file(
             except Exception as e:
                 print(f"[deja] error inserting chunk: {e}", file=sys.stderr)
 
-        # Commit after each batch — crash-safe resume from last committed offset
+        # Commit after each batch — crash-safe resume from last committed offset.
+        # The row is marked partial until the whole file is parsed: a run killed
+        # here must not leave a size/mtime that check_needs_reindex reads as done.
         last = batch_turns[-1]
         batch_offset = last.get("completed_offset", None)
         if last.get("provisional"):
@@ -198,11 +201,17 @@ def index_file(
         else:
             next_idx = last["message_index"] + 1
         if batch_offset is not None:
-            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx, stat_result=stat_before)
+            resume = (batch_offset, next_idx)
+            _update_file_meta(conn, path, batch_offset, source=source, next_message_index=next_idx,
+                              stat_result=stat_before, partial=True)
         conn.commit()
         indexed_any = True
 
-    if not indexed_any:
+    if resume is not None:
+        _update_file_meta(conn, path, resume[0], source=source, next_message_index=resume[1],
+                          stat_result=stat_before)
+        conn.commit()
+    elif not indexed_any:
         _update_file_meta(conn, path, offset, source=source, next_message_index=start_message_index, stat_result=stat_before)
         conn.commit()
 
@@ -253,17 +262,52 @@ def _upsert_chunk(conn, chunk: dict, embedding):
             (chunk_id, chunk["chunk_text"], chunk.get("tool_result_text", "")),
         )
 
+PARTIAL_SIZE = -1  # last_size of a file whose parse has not finished yet
+
+
 def _update_file_meta(conn, path: str, completed_offset: int = None,
                       source: str = "claude-code", next_message_index: int = None,
-                      stat_result=None):
+                      stat_result=None, partial: bool = False):
     stat = stat_result if stat_result is not None else os.stat(path)
     offset = completed_offset if completed_offset is not None else stat.st_size
+    size = PARTIAL_SIZE if partial else stat.st_size
     conn.execute(
         """INSERT OR REPLACE INTO indexed_files
            (path, last_offset, last_mtime, last_size, source, next_message_index)
         VALUES (?, ?, ?, ?, ?, ?)""",
-        (path, offset, stat.st_mtime, stat.st_size, source, next_message_index),
+        (path, offset, stat.st_mtime, size, source, next_message_index),
     )
+
+
+def mark_unfinished_files(conn) -> list[str]:
+    """Find files that a killed run of older versions left looking complete.
+
+    Those versions wrote the final size and mtime after every batch, so a run
+    that died after the first batch made check_needs_reindex skip the rest of
+    the file for good. A file is unfinished if parsing from its stored offset
+    still yields a complete (non-provisional) turn; it is marked partial so the
+    next index run resumes it. Normally the tail holds at most the last,
+    provisional turn, so this costs one short parse per file.
+    """
+    marked = []
+    rows = conn.execute(
+        "SELECT path, last_offset, last_size, source, next_message_index FROM indexed_files"
+    ).fetchall()
+    for path, last_offset, last_size, source, next_idx in rows:
+        if not os.path.exists(path) or last_size == PARTIAL_SIZE:
+            continue
+        if last_offset >= os.path.getsize(path):
+            continue
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        if next_idx is None:
+            _, next_idx = _get_resume_state(conn, session_id, path)
+        parser = get_parser(source)
+        tail = parser.parse(path, offset=last_offset, start_message_index=next_idx)
+        if any(not t.get("provisional") for t in tail):
+            conn.execute("UPDATE indexed_files SET last_size = ? WHERE path = ?", (PARTIAL_SIZE, path))
+            marked.append(path)
+    conn.commit()
+    return marked
 
 CURRENT_PARSER_VERSION = "2"
 
